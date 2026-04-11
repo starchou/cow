@@ -33,9 +33,175 @@ type ParentPool interface {
 	connect(*URL) (net.Conn, error)
 }
 
+type httpParentNode struct {
+	parent    *httpParent
+	latency   time.Duration
+	available bool
+}
+
+type httpParentPool struct {
+	sync.RWMutex
+	nodes     []*httpParentNode
+	available []*httpParentNode
+
+	probeInterval time.Duration
+	probe         func(*httpParent) (time.Duration, error)
+	dial          func(*httpParent, *URL) (net.Conn, error)
+	startOnce     sync.Once
+}
+
+func newHTTPParentPool() *httpParentPool {
+	pp := &httpParentPool{
+		probeInterval: 60 * time.Second,
+	}
+	pp.probe = pp.probeNode
+	pp.dial = pp.dialNode
+	return pp
+}
+
+func (pp *httpParentPool) add(parent *httpParent) {
+	pp.Lock()
+	pp.nodes = append(pp.nodes, &httpParentNode{parent: parent})
+	pp.Unlock()
+}
+
+func (pp *httpParentPool) size() int {
+	pp.RLock()
+	defer pp.RUnlock()
+	return len(pp.nodes)
+}
+
+func (pp *httpParentPool) start() {
+	pp.startOnce.Do(func() {
+		go func() {
+			pp.updateAvailable()
+			ticker := time.NewTicker(pp.probeInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				pp.updateAvailable()
+			}
+		}()
+	})
+}
+
+func (pp *httpParentPool) probeNode(parent *httpParent) (time.Duration, error) {
+	start := time.Now()
+	cn, err := net.DialTimeout("tcp", parent.server, dialTimeout)
+	if err != nil {
+		return latencyMax, err
+	}
+	cn.Close()
+	return time.Since(start), nil
+}
+
+func (pp *httpParentPool) dialNode(parent *httpParent, url *URL) (net.Conn, error) {
+	return connectHTTPParentDirect(parent, url)
+}
+
+func (pp *httpParentPool) updateAvailable() {
+	pp.RLock()
+	nodes := append([]*httpParentNode(nil), pp.nodes...)
+	probe := pp.probe
+	pp.RUnlock()
+
+	if len(nodes) == 0 {
+		return
+	}
+
+	type probeResult struct {
+		node    *httpParentNode
+		latency time.Duration
+		err     error
+	}
+
+	resCh := make(chan probeResult, len(nodes))
+	var wg sync.WaitGroup
+	wg.Add(len(nodes))
+	for _, node := range nodes {
+		go func(node *httpParentNode) {
+			defer wg.Done()
+			latency, err := probe(node.parent)
+			resCh <- probeResult{node: node, latency: latency, err: err}
+		}(node)
+	}
+	wg.Wait()
+	close(resCh)
+
+	available := make([]*httpParentNode, 0, len(nodes))
+	pp.Lock()
+	for res := range resCh {
+		res.node.latency = res.latency
+		res.node.available = res.err == nil
+		if res.node.available {
+			available = append(available, res.node)
+		}
+	}
+	sort.SliceStable(available, func(i, j int) bool {
+		return available[i].latency < available[j].latency
+	})
+	pp.available = available
+	pp.Unlock()
+}
+
+func (pp *httpParentPool) snapshotAvailable() []*httpParentNode {
+	pp.RLock()
+	defer pp.RUnlock()
+	return append([]*httpParentNode(nil), pp.available...)
+}
+
+func (pp *httpParentPool) markUnavailable(node *httpParentNode) {
+	pp.Lock()
+	node.available = false
+	node.latency = latencyMax
+	available := make([]*httpParentNode, 0, len(pp.available))
+	for _, candidate := range pp.available {
+		if candidate != node {
+			available = append(available, candidate)
+		}
+	}
+	pp.available = available
+	pp.Unlock()
+}
+
+func (pp *httpParentPool) connect(url *URL) (net.Conn, error) {
+	if pp.size() == 0 {
+		return nil, errors.New("no http parent proxy")
+	}
+
+	nodes := pp.snapshotAvailable()
+	if len(nodes) == 0 {
+		pp.updateAvailable()
+		nodes = pp.snapshotAvailable()
+	}
+	if len(nodes) == 0 {
+		return nil, errors.New("no available http parent proxy")
+	}
+
+	pp.RLock()
+	dial := pp.dial
+	pp.RUnlock()
+
+	var err error
+	for _, node := range nodes {
+		var conn net.Conn
+		conn, err = dial(node.parent, url)
+		if err == nil {
+			return conn, nil
+		}
+		pp.markUnavailable(node)
+	}
+	return nil, err
+}
+
+func isHTTPParent(parent ParentProxy) bool {
+	_, ok := parent.(*httpParent)
+	return ok
+}
+
 // Init parentProxy to be backup pool. So config parsing have a pool to add
 // parent proxies.
 var parentProxy ParentPool = &backupParentPool{}
+var parentHTTPPool = newHTTPParentPool()
 
 func initParentPool() {
 	backPool, ok := parentProxy.(*backupParentPool)
@@ -48,6 +214,9 @@ func initParentPool() {
 	if len(backPool.parent) == 0 {
 		info.Println("no parent proxy server")
 		return
+	}
+	if parentHTTPPool.size() > 0 {
+		parentHTTPPool.start()
 	}
 	if len(backPool.parent) == 1 && config.LoadBalance != loadBalanceBackup {
 		debug.Println("only 1 parent, no need for load balance")
@@ -133,6 +302,7 @@ func connectInOrder(url *URL, pp []ParentWithFail, start int) (srvconn net.Conn,
 	const baseFailCnt = 9
 	var skipped []int
 	nproxy := len(pp)
+	var triedHTTPParentPool bool
 
 	if nproxy == 0 {
 		return nil, errors.New("no parent proxy")
@@ -141,6 +311,16 @@ func connectInOrder(url *URL, pp []ParentWithFail, start int) (srvconn net.Conn,
 	for i := 0; i < nproxy; i++ {
 		proxyId := (start + i) % nproxy
 		parent := &pp[proxyId]
+		if isHTTPParent(parent.ParentProxy) {
+			if triedHTTPParentPool {
+				continue
+			}
+			triedHTTPParentPool = true
+			if srvconn, err = parentHTTPPool.connect(url); err == nil {
+				return
+			}
+			continue
+		}
 		// skip failed server, but try it with some probability
 		if parent.fail > 0 && rand.Intn(parent.fail+baseFailCnt) != 0 {
 			skipped = append(skipped, proxyId)
@@ -184,6 +364,17 @@ func (pp *latencyParentPool) add(parent ParentProxy) {
 	pp.parent = append(pp.parent, ParentWithLatency{parent, 0})
 }
 
+func (pp *latencyParentPool) setLatency(server string, latency time.Duration) {
+	latencyMutex.Lock()
+	for i := range pp.parent {
+		if pp.parent[i].getServer() == server {
+			pp.parent[i].latency = latency
+			break
+		}
+	}
+	latencyMutex.Unlock()
+}
+
 // Sort interface.
 func (pp *latencyParentPool) Len() int {
 	return len(pp.parent)
@@ -212,12 +403,24 @@ func (pp *latencyParentPool) connect(url *URL) (srvconn net.Conn, err error) {
 
 	var skipped []int
 	nproxy := len(lp)
+	var triedHTTPParentPool bool
 	if nproxy == 0 {
 		return nil, errors.New("no parent proxy")
 	}
 
 	for i := 0; i < nproxy; i++ {
 		parent := lp[i]
+		if isHTTPParent(parent.ParentProxy) {
+			if triedHTTPParentPool {
+				continue
+			}
+			triedHTTPParentPool = true
+			if srvconn, err = parentHTTPPool.connect(url); err == nil {
+				debug.Println("lowest latency http parent proxy")
+				return
+			}
+			continue
+		}
 		if parent.latency >= latencyMax {
 			skipped = append(skipped, i)
 			continue
@@ -226,7 +429,7 @@ func (pp *latencyParentPool) connect(url *URL) (srvconn net.Conn, err error) {
 			debug.Println("lowest latency proxy", parent.getServer())
 			return
 		}
-		parent.latency = latencyMax
+		pp.setLatency(parent.getServer(), latencyMax)
 	}
 	// last resort, try skipped one, not likely to succeed
 	for _, skippedId := range skipped {
@@ -277,7 +480,9 @@ func (parent *ParentWithLatency) updateLatency(wg *sync.WaitGroup) {
 func (pp *latencyParentPool) updateLatency() {
 	// Create a copy, update latency for the copy.
 	var cp latencyParentPool
+	latencyMutex.RLock()
 	cp.parent = append(cp.parent, pp.parent...)
+	latencyMutex.RUnlock()
 
 	// cp.parent is value instead of pointer, if we use `_, p := range cp.parent`,
 	// the value in cp.parent will not be updated.
@@ -351,7 +556,7 @@ func (hp *httpParent) initAuth(userPasswd string) {
 	hp.authHeader = []byte(headerProxyAuthorization + ": Basic " + b64 + CRLF)
 }
 
-func (hp *httpParent) connect(url *URL) (net.Conn, error) {
+func connectHTTPParentDirect(hp *httpParent, url *URL) (net.Conn, error) {
 	c, err := net.Dial("tcp", hp.server)
 	if err != nil {
 		errl.Printf("can't connect to http parent %s for %s: %v\n",
@@ -361,6 +566,10 @@ func (hp *httpParent) connect(url *URL) (net.Conn, error) {
 	debug.Printf("connected to: %s via http parent: %s\n",
 		url.HostPort, hp.server)
 	return httpConn{c, hp}, nil
+}
+
+func (hp *httpParent) connect(url *URL) (net.Conn, error) {
+	return connectHTTPParentDirect(hp, url)
 }
 
 // shadowsocks parent proxy

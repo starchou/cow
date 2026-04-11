@@ -265,6 +265,9 @@ func ParseRequestURI(rawurl string) (*URL, error) {
 }
 
 func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
+	if len(rawurl) == 0 {
+		return nil, errors.New("empty request uri")
+	}
 	if rawurl[0] == '/' {
 		return &URL{Path: string(rawurl)}, nil
 	}
@@ -693,7 +696,7 @@ func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
 	}
 
 	proto := f[0]
-	if !bytes.Equal(proto[0:7], []byte("HTTP/1.")) {
+	if len(proto) != len("HTTP/1.1") || !bytes.Equal(proto[:7], []byte("HTTP/1.")) {
 		return fmt.Errorf("invalid response status line: %s request %v", string(f[0]), r)
 	}
 	if proto[7] == '1' {

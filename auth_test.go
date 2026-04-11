@@ -3,6 +3,8 @@ package main
 import (
 	"net"
 	"testing"
+	"text/template"
+	"time"
 )
 
 func TestParseUserPasswd(t *testing.T) {
@@ -102,5 +104,35 @@ func TestAuthIP(t *testing.T) {
 				t.Errorf("%s should NOT be allowed\n", td.ip)
 			}
 		}
+	}
+}
+
+func TestInitAuthUsesConfiguredTimeout(t *testing.T) {
+	oldConfig := config
+	oldAuth := auth
+	defer func() {
+		config = oldConfig
+		auth = oldAuth
+	}()
+
+	config = Config{
+		UserPasswd:  "user:pass",
+		AuthTimeout: 2 * time.Minute,
+	}
+	auth = struct {
+		required      bool
+		user          map[string]*authUser
+		allowedClient []netAddr
+		authed        *TimeoutSet
+		template      *template.Template
+	}{}
+
+	initAuth()
+
+	if auth.authed == nil {
+		t.Fatal("initAuth should initialize authenticated client cache")
+	}
+	if auth.authed.timeout != config.AuthTimeout {
+		t.Fatalf("auth timeout should be %v, got %v", config.AuthTimeout, auth.authed.timeout)
 	}
 }

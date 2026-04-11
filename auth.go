@@ -123,10 +123,10 @@ func addUserPasswd(val string) {
 		return
 	}
 	user, au, err := parseUserPasswd(val)
-	debug.Println("user:", user, "port:", au.port)
 	if err != nil {
 		Fatal(err)
 	}
+	debug.Println("user:", user, "port:", au.port)
 	if _, ok := auth.user[user]; ok {
 		Fatal("duplicate user:", user)
 	}
@@ -165,7 +165,7 @@ func initAuth() {
 	loadUserPasswdFile(config.UserPasswdFile)
 	parseAllowedClient(config.AllowedClient)
 
-	auth.authed = NewTimeoutSet(time.Duration(config.AuthTimeout) * time.Hour)
+	auth.authed = NewTimeoutSet(config.AuthTimeout)
 
 	rawTemplate := "HTTP/1.1 407 Proxy Authentication Required\r\n" +
 		"Proxy-Authenticate: Digest realm=\"" + authRealm + "\", nonce=\"{{.Nonce}}\", qop=\"auth\"\r\n" +

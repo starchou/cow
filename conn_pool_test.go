@@ -54,3 +54,25 @@ func TestConnPool(t *testing.T) {
 		}
 	}
 }
+
+func TestCloseServerConnDoesNotRemoveReplacedChannel(t *testing.T) {
+	oldPool := connPool
+	defer func() {
+		connPool = oldPool
+	}()
+
+	stale := make(chan *serverConn, 1)
+	live := make(chan *serverConn, 1)
+	connPool = &ConnPool{
+		idleConn: map[string]chan *serverConn{
+			"example.com:80": live,
+		},
+		muxConn: make(chan *serverConn, maxServerConnCnt*2),
+	}
+
+	closeServerConn(stale, "example.com:80", false)
+
+	if got := connPool.idleConn["example.com:80"]; got != live {
+		t.Fatal("closing a stale channel should not remove the live channel from the pool")
+	}
+}

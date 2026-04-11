@@ -103,17 +103,23 @@ func (cp *ConnPool) Put(sv *serverConn) {
 	cp.RUnlock()
 
 	if ch == nil {
-		debug.Printf("connPool %s: new channel\n", sv.hostPort)
-		ch = make(chan *serverConn, maxServerConnCnt)
-		ch <- sv
+		created := false
 		cp.Lock()
-		cp.idleConn[sv.hostPort] = ch
+		ch = cp.idleConn[sv.hostPort]
+		if ch == nil {
+			debug.Printf("connPool %s: new channel\n", sv.hostPort)
+			ch = make(chan *serverConn, maxServerConnCnt)
+			cp.idleConn[sv.hostPort] = ch
+			created = true
+		}
 		cp.Unlock()
-		// start a new goroutine to close stale server connections
-		go closeStaleServerConn(ch, sv.hostPort)
-	} else {
-		putConnToChan(sv, ch, sv.hostPort)
+		if created {
+			// The first goroutine that creates the channel is responsible for
+			// starting its stale-connection cleanup loop.
+			go closeStaleServerConn(ch, sv.hostPort)
+		}
 	}
+	putConnToChan(sv, ch, sv.hostPort)
 }
 
 type chanInPool struct {
@@ -164,7 +170,9 @@ func closeServerConn(ch chan *serverConn, hostPort string, force bool) (done boo
 				// the map.
 				debug.Printf("connPool channel %s: remove\n", hostPort)
 				connPool.Lock()
-				delete(connPool.idleConn, hostPort)
+				if connPool.idleConn[hostPort] == ch {
+					delete(connPool.idleConn, hostPort)
+				}
 				connPool.Unlock()
 			}
 			return true

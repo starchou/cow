@@ -25,6 +25,7 @@ func TestParseListen(t *testing.T) {
 
 func TestTunnelAllowedPort(t *testing.T) {
 	initConfig("")
+	delete(config.TunnelAllowedPort, "*")
 	parser := configParser{}
 	parser.ParseTunnelAllowedPort("1, 2, 3, 4, 5")
 	parser.ParseTunnelAllowedPort("6")
@@ -35,8 +36,8 @@ func TestTunnelAllowedPort(t *testing.T) {
 		port    string
 		allowed bool
 	}{
-		{"80", true}, // default allowd ports
-		{"443", true},
+		{"80", false},
+		{"443", false},
 		{"1", true},
 		{"3", true},
 		{"5", true},
@@ -46,10 +47,20 @@ func TestTunnelAllowedPort(t *testing.T) {
 	}
 
 	for _, td := range testData {
-		allowed := config.TunnelAllowedPort[td.port]
+		allowed := portAllowed(td.port)
 		if allowed != td.allowed {
 			t.Errorf("port %s allowed %v, got %v\n", td.port, td.allowed, allowed)
 		}
+	}
+}
+
+func TestTunnelAllowedPortWildcard(t *testing.T) {
+	initConfig("")
+	if !portAllowed("80") {
+		t.Fatal("default wildcard tunnel setting should allow port 80")
+	}
+	if !portAllowed("8388") {
+		t.Fatal("default wildcard tunnel setting should allow arbitrary ports")
 	}
 }
 

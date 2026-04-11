@@ -249,6 +249,7 @@ func (pp proxyParser) ProxyHttp(val string) {
 
 	parent := newHttpParent(server)
 	parent.initAuth(userPasswd)
+	parentHTTPPool.add(parent)
 	parentProxy.add(parent)
 }
 
@@ -464,6 +465,7 @@ func (p configParser) ParseHttpParent(val string) {
 	}
 	config.saveReqLine = true
 	http.parent = newHttpParent(val)
+	parentHTTPPool.add(http.parent)
 	parentProxy.add(http.parent)
 	http.serverCnt++
 	configNeedUpgrade = true

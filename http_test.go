@@ -63,6 +63,16 @@ func TestParseRequestURI(t *testing.T) {
 	}
 }
 
+func TestParseRequestURIEmpty(t *testing.T) {
+	url, err := ParseRequestURI("")
+	if err == nil {
+		t.Fatal("empty URI should return an error")
+	}
+	if url != nil {
+		t.Fatal("empty URI should not return a parsed URL")
+	}
+}
+
 func TestParseHeader(t *testing.T) {
 	var testData = []struct {
 		raw    string
@@ -108,5 +118,17 @@ func TestParseHeader(t *testing.T) {
 			t.Errorf("%q parsed raw wrong\nshould be: %q\ngot: %q\n",
 				td.raw, td.newraw, newraw.Bytes())
 		}
+	}
+}
+
+func TestParseResponseRejectsShortProtocol(t *testing.T) {
+	sv := &serverConn{
+		bufRd: bufio.NewReader(strings.NewReader("HT 200 OK\r\n\r\n")),
+	}
+	r := &Request{Method: "GET", Header: Header{ConnectionKeepAlive: true}}
+	var rp Response
+
+	if err := parseResponse(sv, r, &rp); err == nil {
+		t.Fatal("short protocol status line should return an error")
 	}
 }
