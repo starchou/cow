@@ -5,6 +5,16 @@ import (
 )
 
 func TestParseListen(t *testing.T) {
+	oldListenProxy := listenProxy
+	oldCmdHasListenAddr := cmdHasListenAddr
+	defer func() {
+		listenProxy = oldListenProxy
+		cmdHasListenAddr = oldCmdHasListenAddr
+	}()
+
+	listenProxy = nil
+	cmdHasListenAddr = false
+
 	parser := configParser{}
 	parser.ParseListen("http://127.0.0.1:8888")
 
@@ -20,6 +30,40 @@ func TestParseListen(t *testing.T) {
 	hp, ok = listenProxy[1].(*httpProxy)
 	if hp.addrInPAC != "1.2.3.4:5678" {
 		t.Error("listen http addrInPAC parse error")
+	}
+}
+
+func TestParseListenSocks5(t *testing.T) {
+	oldListenProxy := listenProxy
+	oldCmdHasListenAddr := cmdHasListenAddr
+	defer func() {
+		listenProxy = oldListenProxy
+		cmdHasListenAddr = oldCmdHasListenAddr
+	}()
+
+	listenProxy = nil
+	cmdHasListenAddr = false
+
+	parser := configParser{}
+	parser.ParseListen("socks5://127.0.0.1:9999")
+
+	sp, ok := listenProxy[0].(*socksProxy)
+	if !ok {
+		t.Fatal("listen socks5 proxy type wrong")
+	}
+	if sp.addr != "127.0.0.1:9999" {
+		t.Fatalf("listen socks5 server address parse error, got %s", sp.addr)
+	}
+
+	listenProxy = nil
+	parser.ParseListen("sock5://127.0.0.1:9998")
+
+	sp, ok = listenProxy[0].(*socksProxy)
+	if !ok {
+		t.Fatal("listen sock5 alias proxy type wrong")
+	}
+	if sp.addr != "127.0.0.1:9998" {
+		t.Fatalf("listen sock5 alias address parse error, got %s", sp.addr)
 	}
 }
 
@@ -104,6 +148,16 @@ func TestParseProxy(t *testing.T) {
 	}
 	if sp.server != "127.0.0.1:1080" {
 		t.Error("socks server address wrong, got:", sp.server)
+	}
+
+	parser.ParseProxy("sock5://127.0.0.1:1081")
+	cnt++
+	sp, ok = pool.parent[cnt].ParentProxy.(*socksParent)
+	if !ok {
+		t.Fatal("sock5 alias parsed not as socksParent")
+	}
+	if sp.server != "127.0.0.1:1081" {
+		t.Error("sock5 alias server address wrong, got:", sp.server)
 	}
 
 	parser.ParseProxy("ss://aes-256-cfb:foobar!@127.0.0.1:1080")

@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version               = "0.9.8"
+	version               = "0.9.9"
 	defaultListenAddr     = "127.0.0.1:7777"
 	defaultEstimateTarget = "example.com"
 )
@@ -340,8 +340,27 @@ func (lp listenParser) ListenCow(val string) {
 	addListenProxy(newCowProxy(method, passwd, addr))
 }
 
+func (lp listenParser) ListenSocks5(val string) {
+	if cmdHasListenAddr {
+		return
+	}
+	if err := checkServerAddr(val); err != nil {
+		Fatal("listen socks5 server", err)
+	}
+	addListenProxy(newSocksProxy(val))
+}
+
 // configParser provides functions to parse options in config file.
 type configParser struct{}
+
+func normalizeProxyProtocol(protocol string) string {
+	switch protocol {
+	case "sock5":
+		return "socks5"
+	default:
+		return protocol
+	}
+}
 
 func (p configParser) ParseProxy(val string) {
 	parser := reflect.ValueOf(proxyParser{})
@@ -351,7 +370,7 @@ func (p configParser) ParseProxy(val string) {
 	if len(arr) != 2 {
 		Fatal("proxy has no protocol specified:", val)
 	}
-	protocol := arr[0]
+	protocol := normalizeProxyProtocol(arr[0])
 
 	methodName := "Proxy" + strings.ToUpper(protocol[0:1]) + protocol[1:]
 	method := parser.MethodByName(methodName)
@@ -377,7 +396,7 @@ func (p configParser) ParseListen(val string) {
 		server = val
 		configNeedUpgrade = true
 	} else {
-		protocol = arr[0]
+		protocol = normalizeProxyProtocol(arr[0])
 		server = arr[1]
 	}
 
@@ -788,4 +807,5 @@ func checkConfig() {
 	if listenProxy == nil {
 		listenProxy = []Proxy{newHttpProxy(defaultListenAddr, "")}
 	}
+	listenProxy = mergeListenProxies(listenProxy)
 }

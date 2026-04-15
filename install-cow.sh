@@ -1,6 +1,6 @@
 #!/bin/bash
 
-version=0.9.8
+version=0.9.9
 
 arch=`uname -m`
 case $arch in
@@ -145,4 +145,3 @@ else
     echo "Please edit $config_dir/rc according to your own settings."
     echo 'After that, execute "cow &" to start cow and run in background.'
 fi
-

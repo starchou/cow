@@ -12,6 +12,9 @@
 #
 #   The generated PAC url in the above example is http://127.0.0.1:7777/pac
 #
+# SOCKS5 (provides socks5 proxy):
+#   listen = socks5://127.0.0.1:7777
+#
 # cow (need two cow servers to use this protocol):
 #   listen = cow://encrypt_method:password@1.2.3.4:5678
 #
@@ -26,6 +29,8 @@
 #	(Use this if you are using port forwarding to provide COW to external network.)
 #
 #       listen = http://127.0.0.1:7777 1.2.3.4:5678
+# - If HTTP and SOCKS5 listen on the same port, COW will use mixed mode and
+#   serve both protocols on the same listener.
 #
 listen = http://0.0.0.0:7777
 

@@ -1,3 +1,9 @@
+0.9.9 (2026-04-15)
+    * Add SOCKS5 server listen mode
+    * Support mixed HTTP and SOCKS5 listener on the same port
+    * Fix SOCKS5 CONNECT handling when using parent proxies
+    * Accept both sock5:// and socks5:// listen/proxy config aliases
+
 0.9.8 (2016-06-19)
     * Fix OTA support bug in shadowsocks (report by @defia)
     * Fix WeChat image url problem (by @breath-co2 @haha1903)

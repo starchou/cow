@@ -362,7 +362,9 @@ func isSelfRequest(r *Request) bool {
 }
 
 func (c *clientConn) serveSelfURL(r *Request) (err error) {
-	if _, ok := c.proxy.(*httpProxy); !ok {
+	switch c.proxy.(type) {
+	case *httpProxy, *mixedProxy:
+	default:
 		goto end
 	}
 	if r.Method != "GET" {
@@ -813,6 +815,10 @@ func maybeBlocked(err error) bool {
 // Connect to requested server according to whether it's visit count.
 // If direct connection fails, try parent proxies.
 func (c *clientConn) connect(r *Request, siteInfo *VisitCnt) (srvconn net.Conn, err error) {
+	return c.connectServer(r, siteInfo, true)
+}
+
+func (c *clientConn) connectServer(r *Request, siteInfo *VisitCnt, sendError bool) (srvconn net.Conn, err error) {
 	var errMsg string
 	if config.AlwaysProxy {
 		if srvconn, err = parentProxy.connect(r.URL); err == nil {
@@ -874,8 +880,11 @@ func (c *clientConn) connect(r *Request, siteInfo *VisitCnt) (srvconn net.Conn, 
 	}
 
 fail:
-	sendErrorPage(c, "504 Connection failed", err.Error(), errMsg)
-	return nil, errPageSent
+	if sendError {
+		sendErrorPage(c, "504 Connection failed", err.Error(), errMsg)
+		return nil, errPageSent
+	}
+	return nil, err
 }
 
 func (c *clientConn) createServerConn(r *Request, siteInfo *VisitCnt) (*serverConn, error) {
@@ -1016,6 +1025,10 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request) (err error) {
 	total := 0
 	const directThreshold = 8192
 	readTimeoutSet := false
+	var reader io.Reader = sv
+	if sv.bufRd != nil {
+		reader = sv.bufRd
+	}
 	for {
 		// debug.Println("srv->cli")
 		if sv.maybeFake() {
@@ -1026,7 +1039,7 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request) (err error) {
 			readTimeoutSet = false
 		}
 		var n int
-		if n, err = sv.Read(buf); err != nil {
+		if n, err = reader.Read(buf); err != nil {
 			if sv.maybeFake() && maybeBlocked(err) {
 				siteStat.TempBlocked(r.URL)
 				debug.Printf("srv->cli blocked site %s detected, err: %v retry\n", r.URL.HostPort, err)
