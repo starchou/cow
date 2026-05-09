@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -696,6 +695,13 @@ var socksError = [...]string{
 
 var socksProtocolErr = errors.New("socks protocol error")
 
+func socksErrorString(code byte) string {
+	if int(code) < len(socksError) && socksError[code] != "" {
+		return socksError[code]
+	}
+	return fmt.Sprintf("unknown socks error %d", code)
+}
+
 var socksMsgVerMethodSelection = []byte{
 	0x5, // version 5
 	1,   // n method
@@ -711,6 +717,8 @@ type socksConn struct {
 	net.Conn
 	parent *socksParent
 }
+
+var socksParentDial = net.Dial
 
 func (s socksConn) String() string {
 	return "socks proxy " + s.parent.server
@@ -728,8 +736,61 @@ func (sp *socksParent) genConfig() string {
 	return fmt.Sprintf("proxy = socks5://%s", sp.server)
 }
 
+func readSocks5Address(r io.Reader, atyp byte) error {
+	switch atyp {
+	case socks5AtypIPv4:
+		var addr [4]byte
+		_, err := io.ReadFull(r, addr[:])
+		return err
+	case socks5AtypIPv6:
+		var addr [16]byte
+		_, err := io.ReadFull(r, addr[:])
+		return err
+	case socks5AtypDomain:
+		var size [1]byte
+		if _, err := io.ReadFull(r, size[:]); err != nil {
+			return err
+		}
+		addr := make([]byte, int(size[0]))
+		_, err := io.ReadFull(r, addr)
+		return err
+	default:
+		return socksProtocolErr
+	}
+}
+
+func readSocks5ConnectReply(r io.Reader, hostPort string) error {
+	var header [4]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		if err != io.EOF {
+			errl.Printf("read socks reply err %v\n", err)
+		}
+		return errors.New("connection failed. No such host?")
+	}
+
+	if header[0] != socks5Version {
+		errl.Printf("socks reply connect %s VER %d not supported\n", hostPort, header[0])
+		return socksProtocolErr
+	}
+	if err := readSocks5Address(r, header[3]); err != nil {
+		errl.Printf("socks reply connect %s ATYP %d\n", hostPort, header[3])
+		return err
+	}
+	var port [2]byte
+	if _, err := io.ReadFull(r, port[:]); err != nil {
+		errl.Printf("read socks reply port err %v\n", err)
+		return err
+	}
+
+	if header[1] != 0 {
+		errl.Printf("socks reply connect %s error %s\n", hostPort, socksErrorString(header[1]))
+		return socksProtocolErr
+	}
+	return nil
+}
+
 func (sp *socksParent) connect(url *URL) (net.Conn, error) {
-	c, err := net.Dial("tcp", sp.server)
+	c, err := socksParentDial("tcp", sp.server)
 	if err != nil {
 		errl.Printf("can't connect to socks parent %s for %s: %v\n",
 			sp.server, url.HostPort, err)
@@ -774,50 +835,29 @@ func (sp *socksParent) connect(url *URL) (net.Conn, error) {
 		return nil, err
 	}
 
-	hostLen := len(host)
-	bufLen := 5 + hostLen + 2 // last 2 is port
-	reqBuf := make([]byte, bufLen)
-	reqBuf[0] = 5 // version 5
-	reqBuf[1] = 1 // cmd: connect
-	// reqBuf[2] = 0 // rsv: set to 0 when initializing
-	reqBuf[3] = 3 // atyp: domain name
-	reqBuf[4] = byte(hostLen)
-	copy(reqBuf[5:], host)
-	binary.BigEndian.PutUint16(reqBuf[5+hostLen:5+hostLen+2], uint16(port))
+	if port < 0 || port > 0xffff {
+		err = fmt.Errorf("invalid socks target port %d", port)
+		hasErr = true
+		return nil, err
+	}
+	addrPort, err := buildSocks5AddrPort(host, uint16(port))
+	if err != nil {
+		hasErr = true
+		return nil, err
+	}
+	reqBuf := make([]byte, 0, 3+len(addrPort))
+	reqBuf = append(reqBuf, socks5Version, socks5CmdConnect, 0x00)
+	reqBuf = append(reqBuf, addrPort...)
 
-	if n, err = c.Write(reqBuf); err != nil || n != bufLen {
+	if n, err = c.Write(reqBuf); err != nil || n != len(reqBuf) {
 		errl.Printf("send socks request err %v n %d\n", err, n)
 		hasErr = true
 		return nil, err
 	}
 
-	// I'm not clear why the buffer is fixed at 10. The rfc document does not say this.
-	// Polipo set this to 10 and I also observed the reply is always 10.
-	replyBuf := make([]byte, 10)
-	if n, err = c.Read(replyBuf); err != nil {
-		// Seems that socks server will close connection if it can't find host
-		if err != io.EOF {
-			errl.Printf("read socks reply err %v n %d\n", err, n)
-		}
+	if err = readSocks5ConnectReply(c, url.HostPort); err != nil {
 		hasErr = true
-		return nil, errors.New("connection failed (by socks server " + sp.server + "). No such host?")
-	}
-	// debug.Printf("Socks reply length %d\n", n)
-
-	if replyBuf[0] != 5 {
-		errl.Printf("socks reply connect %s VER %d not supported\n", url.HostPort, replyBuf[0])
-		hasErr = true
-		return nil, socksProtocolErr
-	}
-	if replyBuf[1] != 0 {
-		errl.Printf("socks reply connect %s error %s\n", url.HostPort, socksError[replyBuf[1]])
-		hasErr = true
-		return nil, socksProtocolErr
-	}
-	if replyBuf[3] != 1 {
-		errl.Printf("socks reply connect %s ATYP %d\n", url.HostPort, replyBuf[3])
-		hasErr = true
-		return nil, socksProtocolErr
+		return nil, err
 	}
 
 	debug.Println("connected to:", url.HostPort, "via socks server:", sp.server)

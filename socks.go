@@ -21,6 +21,7 @@ const (
 	socks5AuthNoAcceptable      = 0xff
 	socks5UserPassVersion       = 0x01
 	socks5CmdConnect            = 0x01
+	socks5CmdUDPAssociate       = 0x03
 	socks5AtypIPv4              = 0x01
 	socks5AtypDomain            = 0x03
 	socks5AtypIPv6              = 0x04
@@ -29,6 +30,7 @@ const (
 	socks5StatusConnRefused     = 0x05
 	socks5StatusCmdUnsupported  = 0x07
 	socks5StatusAtypUnsupported = 0x08
+	socks5UDPBufferSize         = 65535
 )
 
 type socksProxy struct {
@@ -446,52 +448,123 @@ func (c *clientConn) readSocks5Target(atyp byte) (host string, port uint16, err 
 	return
 }
 
-func (c *clientConn) parseSocks5Request(r *Request) error {
+type socks5ParsedRequest struct {
+	cmd      byte
+	host     string
+	port     uint16
+	hostPort string
+}
+
+func (c *clientConn) parseSocks5Request(r *Request) (req socks5ParsedRequest, err error) {
 	var header [4]byte
-	if _, err := io.ReadFull(c.bufRd, header[:]); err != nil {
-		return err
+	if _, err = io.ReadFull(c.bufRd, header[:]); err != nil {
+		return
 	}
 	if header[0] != socks5Version {
-		return newSocksRequestError(socks5StatusGeneralError, "unsupported socks version %d", header[0])
+		err = newSocksRequestError(socks5StatusGeneralError, "unsupported socks version %d", header[0])
+		return
 	}
-	if header[1] != socks5CmdConnect {
-		return newSocksRequestError(socks5StatusCmdUnsupported, "unsupported socks command %d", header[1])
+	if header[2] != 0x00 {
+		err = newSocksRequestError(socks5StatusGeneralError, "invalid socks reserved byte %d", header[2])
+		return
+	}
+	if header[1] != socks5CmdConnect && header[1] != socks5CmdUDPAssociate {
+		err = newSocksRequestError(socks5StatusCmdUnsupported, "unsupported socks command %d", header[1])
+		return
 	}
 
 	host, port, err := c.readSocks5Target(header[3])
 	if err != nil {
-		return err
+		return
 	}
 
-	r.reset()
-	r.Method = "CONNECT"
-	r.isConnect = true
-	r.URL = &URL{}
-	r.URL.ParseHostPort(net.JoinHostPort(host, strconv.Itoa(int(port))))
-	r.Header.Host = r.URL.HostPort
-	return nil
+	req.cmd = header[1]
+	req.host = host
+	req.port = port
+	req.hostPort = net.JoinHostPort(host, strconv.Itoa(int(port)))
+
+	if req.cmd == socks5CmdConnect {
+		r.reset()
+		r.Method = "CONNECT"
+		r.isConnect = true
+		r.URL = &URL{}
+		r.URL.ParseHostPort(req.hostPort)
+		r.Header.Host = r.URL.HostPort
+	}
+	return
+}
+
+func trimIPv6Zone(host string) string {
+	if i := strings.LastIndexByte(host, '%'); i >= 0 {
+		return host[:i]
+	}
+	return host
+}
+
+func buildSocks5AddrPort(host string, port uint16) ([]byte, error) {
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	ipHost := trimIPv6Zone(host)
+
+	var buf bytes.Buffer
+	if ip := net.ParseIP(ipHost); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			buf.WriteByte(socks5AtypIPv4)
+			buf.Write(ip4)
+		} else if ip16 := ip.To16(); ip16 != nil {
+			buf.WriteByte(socks5AtypIPv6)
+			buf.Write(ip16)
+		} else {
+			return nil, fmt.Errorf("invalid socks5 ip %q", host)
+		}
+	} else {
+		if len(host) == 0 || len(host) > 255 {
+			return nil, fmt.Errorf("invalid socks5 host %q", host)
+		}
+		buf.WriteByte(socks5AtypDomain)
+		buf.WriteByte(byte(len(host)))
+		buf.WriteString(host)
+	}
+
+	var portBytes [2]byte
+	binary.BigEndian.PutUint16(portBytes[:], port)
+	buf.Write(portBytes[:])
+	return buf.Bytes(), nil
 }
 
 func buildSocks5Reply(reply byte, addr net.Addr) []byte {
-	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
-		if ip4 := tcpAddr.IP.To4(); ip4 != nil {
-			resp := []byte{socks5Version, reply, 0x00, socks5AtypIPv4, 0, 0, 0, 0, 0, 0}
-			copy(resp[4:8], ip4)
-			binary.BigEndian.PutUint16(resp[8:10], uint16(tcpAddr.Port))
-			return resp
+	ip := net.IPv4zero
+	port := 0
+	zone := ""
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		if a.IP != nil {
+			ip = a.IP
 		}
-		if ip6 := tcpAddr.IP.To16(); ip6 != nil {
-			resp := make([]byte, 22)
-			resp[0] = socks5Version
-			resp[1] = reply
-			resp[2] = 0x00
-			resp[3] = socks5AtypIPv6
-			copy(resp[4:20], ip6)
-			binary.BigEndian.PutUint16(resp[20:22], uint16(tcpAddr.Port))
-			return resp
+		port = a.Port
+		zone = a.Zone
+	case *net.UDPAddr:
+		if a.IP != nil {
+			ip = a.IP
 		}
+		port = a.Port
+		zone = a.Zone
 	}
-	return []byte{socks5Version, reply, 0x00, socks5AtypIPv4, 0, 0, 0, 0, 0, 0}
+
+	if port < 0 || port > 0xffff {
+		port = 0
+	}
+	host := ip.String()
+	if zone != "" && ip.To4() == nil {
+		host += "%" + zone
+	}
+	addrPort, err := buildSocks5AddrPort(host, uint16(port))
+	if err != nil {
+		addrPort = []byte{socks5AtypIPv4, 0, 0, 0, 0, 0, 0}
+	}
+	resp := make([]byte, 0, 3+len(addrPort))
+	resp = append(resp, socks5Version, reply, 0x00)
+	resp = append(resp, addrPort...)
+	return resp
 }
 
 func (c *clientConn) writeSocks5Reply(reply byte, addr net.Addr) error {
@@ -514,6 +587,258 @@ func socksReplyFromError(err error) byte {
 		return socks5StatusConnRefused
 	}
 	return socks5StatusGeneralError
+}
+
+func isZeroIP(ip net.IP) bool {
+	return ip == nil || ip.Equal(net.IPv4zero) || ip.Equal(net.IPv6zero)
+}
+
+func listenSocks5UDPRelay(tcpLocal net.Addr) (*net.UDPConn, error) {
+	var ip net.IP
+	var zone string
+	if tcpAddr, ok := tcpLocal.(*net.TCPAddr); ok {
+		ip = tcpAddr.IP
+		zone = tcpAddr.Zone
+	}
+
+	network := "udp"
+	if ip != nil && ip.To4() == nil && ip.To16() != nil {
+		network = "udp6"
+	}
+	return net.ListenUDP(network, &net.UDPAddr{IP: ip, Port: 0, Zone: zone})
+}
+
+func socks5UDPReplyAddr(tcpLocal net.Addr, udpLocal *net.UDPAddr) net.Addr {
+	if udpLocal == nil {
+		return nil
+	}
+	if tcpAddr, ok := tcpLocal.(*net.TCPAddr); ok && !isZeroIP(tcpAddr.IP) {
+		return &net.UDPAddr{IP: tcpAddr.IP, Port: udpLocal.Port, Zone: tcpAddr.Zone}
+	}
+	return udpLocal
+}
+
+func sameSocks5UDPClient(tcpPeerIP string, current, expected *net.UDPAddr) bool {
+	if current == nil {
+		return false
+	}
+	if expected != nil {
+		return current.IP.Equal(expected.IP) && current.Port == expected.Port && current.Zone == expected.Zone
+	}
+	if tcpPeerIP == "" {
+		return true
+	}
+	peerIP := net.ParseIP(tcpPeerIP)
+	return peerIP != nil && current.IP.Equal(peerIP)
+}
+
+func parseSocks5UDPDatagram(packet []byte) (target string, payload []byte, err error) {
+	if len(packet) < 4 {
+		return "", nil, newSocksRequestError(socks5StatusGeneralError, "socks5 udp packet too short")
+	}
+	if packet[0] != 0x00 || packet[1] != 0x00 {
+		return "", nil, newSocksRequestError(socks5StatusGeneralError, "invalid socks5 udp reserved field")
+	}
+	if packet[2] != 0x00 {
+		return "", nil, newSocksRequestError(socks5StatusCmdUnsupported, "socks5 udp fragment is not supported")
+	}
+
+	off := 4
+	var host string
+	switch packet[3] {
+	case socks5AtypIPv4:
+		if len(packet) < off+net.IPv4len+2 {
+			return "", nil, newSocksRequestError(socks5StatusGeneralError, "socks5 udp ipv4 packet too short")
+		}
+		host = net.IP(packet[off : off+net.IPv4len]).String()
+		off += net.IPv4len
+	case socks5AtypIPv6:
+		if len(packet) < off+net.IPv6len+2 {
+			return "", nil, newSocksRequestError(socks5StatusGeneralError, "socks5 udp ipv6 packet too short")
+		}
+		host = net.IP(packet[off : off+net.IPv6len]).String()
+		off += net.IPv6len
+	case socks5AtypDomain:
+		if len(packet) < off+1 {
+			return "", nil, newSocksRequestError(socks5StatusGeneralError, "socks5 udp domain length missing")
+		}
+		size := int(packet[off])
+		off++
+		if size == 0 || len(packet) < off+size+2 {
+			return "", nil, newSocksRequestError(socks5StatusGeneralError, "socks5 udp domain packet too short")
+		}
+		host = string(packet[off : off+size])
+		off += size
+	default:
+		return "", nil, newSocksRequestError(socks5StatusAtypUnsupported, "unsupported socks5 udp address type %d", packet[3])
+	}
+
+	port := binary.BigEndian.Uint16(packet[off : off+2])
+	off += 2
+	return net.JoinHostPort(host, strconv.Itoa(int(port))), packet[off:], nil
+}
+
+func buildSocks5UDPDatagram(addr string, payload []byte) ([]byte, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 0 || port > 0xffff {
+		return nil, fmt.Errorf("invalid udp port %q", portStr)
+	}
+	addrPort, err := buildSocks5AddrPort(host, uint16(port))
+	if err != nil {
+		return nil, err
+	}
+
+	buf := bytes.NewBuffer(make([]byte, 0, len(payload)+3+len(addrPort)))
+	buf.Write([]byte{0x00, 0x00, 0x00})
+	buf.Write(addrPort)
+	buf.Write(payload)
+	return buf.Bytes(), nil
+}
+
+func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
+	relayConn, err := listenSocks5UDPRelay(c.LocalAddr())
+	if err != nil {
+		c.writeSocks5Reply(socksReplyFromError(err), nil)
+		return err
+	}
+	defer relayConn.Close()
+
+	outConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		c.writeSocks5Reply(socksReplyFromError(err), nil)
+		return err
+	}
+	defer outConn.Close()
+
+	udpLocal, _ := relayConn.LocalAddr().(*net.UDPAddr)
+	if err := c.writeSocks5Reply(socks5StatusSucceeded, socks5UDPReplyAddr(c.LocalAddr(), udpLocal)); err != nil {
+		return err
+	}
+	if debug {
+		debug.Printf("cli(%s) socks5 udp associate %s -> relay %s\n", c.RemoteAddr(), req.hostPort, relayConn.LocalAddr())
+	}
+
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			relayConn.Close()
+			outConn.Close()
+			close(done)
+		})
+	}
+
+	go func() {
+		var one [1]byte
+		for {
+			if _, err := c.bufRd.Read(one[:]); err != nil {
+				closeAll()
+				return
+			}
+		}
+	}()
+
+	clientIP, _, _ := net.SplitHostPort(c.RemoteAddr().String())
+	var clientMu sync.RWMutex
+	var clientAddr *net.UDPAddr
+	setClientAddr := func(addr *net.UDPAddr) {
+		clientMu.Lock()
+		if clientAddr == nil {
+			clientAddr = addr
+		}
+		clientMu.Unlock()
+	}
+	getClientAddr := func() *net.UDPAddr {
+		clientMu.RLock()
+		addr := clientAddr
+		clientMu.RUnlock()
+		return addr
+	}
+
+	go func() {
+		buf := make([]byte, socks5UDPBufferSize)
+		for {
+			n, remoteAddr, err := outConn.ReadFromUDP(buf)
+			if err != nil {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if debug {
+					debug.Printf("cli(%s) socks5 udp read remote %v\n", c.RemoteAddr(), err)
+				}
+				continue
+			}
+			addr := getClientAddr()
+			if addr == nil {
+				continue
+			}
+			packet, err := buildSocks5UDPDatagram(remoteAddr.String(), buf[:n])
+			if err != nil {
+				if debug {
+					debug.Printf("cli(%s) socks5 udp build reply from %s: %v\n", c.RemoteAddr(), remoteAddr, err)
+				}
+				continue
+			}
+			if _, err := relayConn.WriteToUDP(packet, addr); err != nil {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if debug {
+					debug.Printf("cli(%s) socks5 udp write client %v\n", c.RemoteAddr(), err)
+				}
+			}
+		}
+	}()
+
+	buf := make([]byte, socks5UDPBufferSize)
+	for {
+		n, srcAddr, err := relayConn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-done:
+				return nil
+			default:
+			}
+			return err
+		}
+		expected := getClientAddr()
+		if !sameSocks5UDPClient(clientIP, srcAddr, expected) {
+			if debug {
+				debug.Printf("cli(%s) drop socks5 udp packet from unexpected addr %s\n", c.RemoteAddr(), srcAddr)
+			}
+			continue
+		}
+		setClientAddr(srcAddr)
+
+		target, payload, err := parseSocks5UDPDatagram(buf[:n])
+		if err != nil {
+			if debug {
+				debug.Printf("cli(%s) parse socks5 udp packet from %s: %v\n", c.RemoteAddr(), srcAddr, err)
+			}
+			continue
+		}
+		remoteAddr, err := net.ResolveUDPAddr("udp", target)
+		if err != nil {
+			if debug {
+				debug.Printf("cli(%s) resolve socks5 udp target %s: %v\n", c.RemoteAddr(), target, err)
+			}
+			continue
+		}
+		if _, err := outConn.WriteToUDP(payload, remoteAddr); err != nil {
+			if debug {
+				debug.Printf("cli(%s) forward socks5 udp to %s: %v\n", c.RemoteAddr(), remoteAddr, err)
+			}
+			continue
+		}
+	}
 }
 
 func (c *clientConn) createSocksServerConn(r *Request, siteInfo *VisitCnt) (*serverConn, error) {
@@ -620,8 +945,16 @@ func (c *clientConn) serveSocks() {
 		}
 		return
 	}
-	if err := c.parseSocks5Request(&r); err != nil {
+	req, err := c.parseSocks5Request(&r)
+	if err != nil {
 		c.writeSocks5Reply(socksReplyFromError(err), nil)
+		return
+	}
+
+	if req.cmd == socks5CmdUDPAssociate {
+		if err := c.serveSocksUDPAssociate(req); err != nil && debug {
+			debug.Printf("cli(%s) socks5 udp associate %v\n", c.RemoteAddr(), err)
+		}
 		return
 	}
 

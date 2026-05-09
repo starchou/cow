@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -135,5 +136,76 @@ func TestConnectInOrderUsesHTTPParentPool(t *testing.T) {
 	available := pool.snapshotAvailable()
 	if len(available) != 1 || available[0].parent.server != "good:2" {
 		t.Fatalf("bad parent should be removed from available list, got %+v", available)
+	}
+}
+
+func TestSocksParentConnectReadsVariableLengthReply(t *testing.T) {
+	oldDial := socksParentDial
+	defer func() {
+		socksParentDial = oldDial
+	}()
+
+	errCh := make(chan error, 1)
+	clientSide, parentSide := net.Pipe()
+	socksParentDial = func(network, address string) (net.Conn, error) {
+		return clientSide, nil
+	}
+
+	go func() {
+		defer parentSide.Close()
+		method := make([]byte, 3)
+		if _, err := io.ReadFull(parentSide, method); err != nil {
+			errCh <- err
+			return
+		}
+		if _, err := parentSide.Write([]byte{socks5Version, socks5AuthNone}); err != nil {
+			errCh <- err
+			return
+		}
+
+		reqHead := make([]byte, 5)
+		if _, err := io.ReadFull(parentSide, reqHead); err != nil {
+			errCh <- err
+			return
+		}
+		target := make([]byte, int(reqHead[4])+2)
+		if _, err := io.ReadFull(parentSide, target); err != nil {
+			errCh <- err
+			return
+		}
+
+		reply := []byte{
+			socks5Version, 0, 0, socks5AtypIPv6,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+			0x12, 0x34,
+		}
+		reply = append(reply, []byte("payload")...)
+		if _, err := parentSide.Write(reply); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	sp := newSocksParent("127.0.0.1:1080")
+	conn, err := sp.connect(&URL{
+		Host:     "example.com",
+		Port:     "443",
+		HostPort: "example.com:443",
+	})
+	if err != nil {
+		t.Fatalf("connect returned error: %v", err)
+	}
+	defer conn.Close()
+
+	payload := make([]byte, len("payload"))
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	if string(payload) != "payload" {
+		t.Fatalf("socks reply bytes leaked into tunnel, got %q", payload)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("fake socks parent error: %v", err)
 	}
 }
