@@ -1,6 +1,9 @@
 package main
 
 import (
+	"flag"
+	"io"
+	"os"
 	"testing"
 	"time"
 )
@@ -31,6 +34,28 @@ func TestParseListen(t *testing.T) {
 	hp, ok = listenProxy[1].(*httpProxy)
 	if hp.addrInPAC != "1.2.3.4:5678" {
 		t.Error("listen http addrInPAC parse error")
+	}
+}
+
+func TestParseCmdLineConfigVersionDoesNotRequireRc(t *testing.T) {
+	oldArgs := os.Args
+	oldFlags := flag.CommandLine
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldFlags
+	}()
+
+	missingRc := "/path/to/missing/cow/rc"
+	os.Args = []string{"cow", "-version", "-rc", missingRc}
+	flag.CommandLine = flag.NewFlagSet("cow", flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+
+	cmdLineConfig := parseCmdLineConfig()
+	if !cmdLineConfig.PrintVer {
+		t.Fatal("-version should enable version output")
+	}
+	if cmdLineConfig.RcFile != missingRc {
+		t.Fatalf("-version should not normalize or check rc file, got %s", cmdLineConfig.RcFile)
 	}
 }
 

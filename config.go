@@ -132,6 +132,10 @@ func parseCmdLineConfig() *Config {
 	flag.BoolVar(&c.Systemd, "systemd", false, "print systemd config, depends on $GOPATH, $HOME")
 	flag.Parse()
 
+	if c.PrintVer || c.SampleConfig || c.Systemd {
+		return &c
+	}
+
 	if c.RcFile == "" {
 		c.RcFile = getDefaultRcFile()
 	} else {
