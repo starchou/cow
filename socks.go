@@ -902,12 +902,14 @@ func (sv *serverConn) tunnel(r *Request, c *clientConn) (err error) {
 	var cli2srvErr error
 	done := make(chan struct{})
 	srvStopped := newNotification()
+	activity := newTunnelWatchdog(config.TunnelTimeout, c.Conn, sv.Conn)
+	defer activity.stop()
 	go func() {
-		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, done)
+		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, done, activity)
 		sv.Close()
 	}()
 
-	err = copyServer2Client(sv, c, r)
+	err = copyServer2Client(sv, c, r, activity)
 	if isErrRetry(err) {
 		srvStopped.notify()
 		<-done

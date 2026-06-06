@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestParseListen(t *testing.T) {
@@ -105,6 +106,15 @@ func TestTunnelAllowedPortWildcard(t *testing.T) {
 	}
 	if !portAllowed("8388") {
 		t.Fatal("default wildcard tunnel setting should allow arbitrary ports")
+	}
+}
+
+func TestParseTunnelTimeout(t *testing.T) {
+	initConfig("")
+	parser := configParser{}
+	parser.ParseTunnelTimeout("3m")
+	if config.TunnelTimeout != 3*time.Minute {
+		t.Fatalf("tunnelTimeout parse error, got %v", config.TunnelTimeout)
 	}
 }
 

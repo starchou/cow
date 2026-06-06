@@ -150,6 +150,8 @@ tunnelAllowedPort = *
 #dialTimeout = 5s
 # 从服务器读超时
 #readTimeout = 5s
+# 隧道连接无流量多久后关闭；设为 0s 可禁用
+#tunnelTimeout = 2m
 
 # 基于 client 是否很快关闭连接来检测 SSL 错误，只对 Chrome 有效
 # （Chrome 遇到 SSL 错误会直接关闭连接，而不是让用户选择是否继续）

@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version               = "0.9.9"
+	version               = "0.9.10"
 	defaultListenAddr     = "127.0.0.1:7777"
 	defaultEstimateTarget = "example.com"
 )
@@ -58,8 +58,9 @@ type Config struct {
 	AuthTimeout    time.Duration
 
 	// advanced options
-	DialTimeout time.Duration
-	ReadTimeout time.Duration
+	DialTimeout   time.Duration
+	ReadTimeout   time.Duration
+	TunnelTimeout time.Duration
 
 	Core         int
 	DetectSSLErr bool
@@ -103,6 +104,7 @@ func initConfig(rcFile string) {
 	config.AuthTimeout = 2 * time.Hour
 	config.DialTimeout = defaultDialTimeout
 	config.ReadTimeout = defaultReadTimeout
+	config.TunnelTimeout = defaultTunnelConnTimeout
 
 	config.TunnelAllowedPort = make(map[string]bool)
 	for _, port := range defaultTunnelAllowedPort {
@@ -638,6 +640,10 @@ func (p configParser) ParseHttpErrorCode(val string) {
 
 func (p configParser) ParseReadTimeout(val string) {
 	config.ReadTimeout = parseDuration(val, "readTimeout")
+}
+
+func (p configParser) ParseTunnelTimeout(val string) {
+	config.TunnelTimeout = parseDuration(val, "tunnelTimeout")
 }
 
 func (p configParser) ParseDialTimeout(val string) {

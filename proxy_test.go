@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cyfdecyf/bufio"
 )
@@ -104,5 +106,37 @@ func TestInitSelfListenAddr(t *testing.T) {
 		if td.self && td.r.URL.Host == "" {
 			t.Error("isSelfRequest should set url host", td.r.Header.Host)
 		}
+	}
+}
+
+func TestTunnelIdleTimeout(t *testing.T) {
+	oldTimeout := config.TunnelTimeout
+	config.TunnelTimeout = 30 * time.Millisecond
+	defer func() {
+		config.TunnelTimeout = oldTimeout
+	}()
+
+	clientSide, clientPeer := net.Pipe()
+	defer clientPeer.Close()
+	serverSide, serverPeer := net.Pipe()
+	defer serverPeer.Close()
+
+	c := &clientConn{Conn: clientSide}
+	sv := newServerConn(serverSide, "example.com:443", alwaysDirectVisitCnt)
+	r := &Request{
+		Method:    "CONNECT",
+		isConnect: true,
+		URL:       &URL{HostPort: "example.com:443"},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sv.tunnel(r, c)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle tunnel did not close after tunnel timeout")
 	}
 }

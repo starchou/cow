@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cyfdecyf/bufio"
@@ -42,6 +43,7 @@ const defaultServerConnTimeout = 15 * time.Second
 // very conservative and easy to cause problem if we are not careful to limit
 // open fds.)
 const clientConnTimeout = 15 * time.Second
+const defaultTunnelConnTimeout = 2 * time.Minute
 const fullKeepAliveHeader = "Keep-Alive: timeout=15\r\n"
 
 // If client closed connection for HTTP CONNECT method in less then 1 second,
@@ -992,6 +994,68 @@ func (sv *serverConn) maybeSSLErr(cliStart time.Time) bool {
 	return sv.state > svConnected && time.Now().Sub(cliStart) < sslLeastDuration
 }
 
+type tunnelWatchdog struct {
+	timeout time.Duration
+	last    int64
+	done    chan struct{}
+	once    sync.Once
+}
+
+func newTunnelWatchdog(timeout time.Duration, conns ...net.Conn) *tunnelWatchdog {
+	if timeout <= 0 {
+		return nil
+	}
+	tw := &tunnelWatchdog{
+		timeout: timeout,
+		done:    make(chan struct{}),
+	}
+	tw.touch()
+	go tw.watch(conns...)
+	return tw
+}
+
+func (tw *tunnelWatchdog) touch() {
+	if tw == nil {
+		return
+	}
+	atomic.StoreInt64(&tw.last, time.Now().UnixNano())
+}
+
+func (tw *tunnelWatchdog) stop() {
+	if tw == nil {
+		return
+	}
+	tw.once.Do(func() {
+		close(tw.done)
+	})
+}
+
+func (tw *tunnelWatchdog) watch(conns ...net.Conn) {
+	interval := tw.timeout / 2
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-tw.done:
+			return
+		case <-ticker.C:
+			last := atomic.LoadInt64(&tw.last)
+			if time.Since(time.Unix(0, last)) < tw.timeout {
+				continue
+			}
+			debug.Printf("close idle tunnel after %v\n", tw.timeout)
+			for _, cn := range conns {
+				cn.Close()
+			}
+			return
+		}
+	}
+}
+
 func (sv *serverConn) mayBeClosed() bool {
 	if _, ok := sv.Conn.(cowConn); ok {
 		debug.Println("cow parent would keep alive")
@@ -1008,7 +1072,7 @@ const connectBufSize = 4096
 // concurrent connect method.
 var connectBuf = leakybuf.NewLeakyBuf(512, connectBufSize)
 
-func copyServer2Client(sv *serverConn, c *clientConn, r *Request) (err error) {
+func copyServer2Client(sv *serverConn, c *clientConn, r *Request, activity *tunnelWatchdog) (err error) {
 	buf := connectBuf.Get()
 	defer func() {
 		connectBuf.Put(buf)
@@ -1050,6 +1114,7 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request) (err error) {
 			// debug.Printf("copyServer2Client read data: %v\n", err)
 			return
 		}
+		activity.touch()
 		total += n
 		if _, err = c.Write(buf[0:n]); err != nil {
 			// debug.Printf("copyServer2Client write data: %v\n", err)
@@ -1095,7 +1160,7 @@ func (sw *serverWriter) Write(p []byte) (int, error) {
 	return sw.sv.Write(p)
 }
 
-func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped notification, done chan struct{}) (err error) {
+func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped notification, done chan struct{}, activity *tunnelWatchdog) (err error) {
 	// sv.maybeFake may change during execution in this function.
 	// So need a variable to record the whether timeout is set.
 	deadlineIsSet := false
@@ -1119,6 +1184,7 @@ func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped not
 			debug.Println("cli->srv send to server error")
 			return
 		}
+		activity.touch()
 	}
 
 	w := newServerWriter(r, sv)
@@ -1130,6 +1196,7 @@ func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped not
 				// debug.Printf("cli->srv write buffered err: %v\n", err)
 				return
 			}
+			activity.touch()
 		}
 		if debug {
 			debug.Printf("cli(%s)->srv(%s) released read buffer\n",
@@ -1168,6 +1235,7 @@ func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped not
 			// debug.Printf("cli->srv read err: %v\n", err)
 			return
 		}
+		activity.touch()
 
 		// copyServer2Client will detect write to closed server. Just store client content for retry.
 		if _, err = w.Write(buf[:n]); err != nil {
@@ -1215,16 +1283,18 @@ func (sv *serverConn) doConnect(r *Request, c *clientConn) (err error) {
 	var cli2srvErr error
 	done := make(chan struct{})
 	srvStopped := newNotification()
+	activity := newTunnelWatchdog(config.TunnelTimeout, c.Conn, sv.Conn)
+	defer activity.stop()
 	go func() {
 		// debug.Printf("doConnect: cli(%s)->srv(%s)\n", c.RemoteAddr(), r.URL.HostPort)
-		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, done)
+		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, done, activity)
 		// Close sv to force read from server in copyServer2Client return.
 		// Note: there's no other code closing the server connection for CONNECT.
 		sv.Close()
 	}()
 
 	// debug.Printf("doConnect: srv(%s)->cli(%s)\n", r.URL.HostPort, c.RemoteAddr())
-	err = copyServer2Client(sv, c, r)
+	err = copyServer2Client(sv, c, r, activity)
 	if isErrRetry(err) {
 		srvStopped.notify()
 		<-done
