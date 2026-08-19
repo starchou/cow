@@ -143,6 +143,21 @@ func TestParseTunnelTimeout(t *testing.T) {
 	}
 }
 
+func TestParseSocks5UDPTimeout(t *testing.T) {
+	oldConfig := config
+	defer func() { config = oldConfig }()
+
+	initConfig("")
+	if config.Socks5UDPTimeout != 5*time.Minute {
+		t.Fatalf("default socks5UDPTimeout should be 5m, got %v", config.Socks5UDPTimeout)
+	}
+	parser := configParser{}
+	parser.ParseSocks5UDPTimeout("7m")
+	if config.Socks5UDPTimeout != 7*time.Minute {
+		t.Fatalf("socks5UDPTimeout parse error, got %v", config.Socks5UDPTimeout)
+	}
+}
+
 func TestParseProxy(t *testing.T) {
 	pool, ok := parentProxy.(*backupParentPool)
 	if !ok {

@@ -176,6 +176,10 @@ tunnelAllowedPort = *
 #readTimeout = 5s
 # Close idle tunnel connections after this duration; set to 0s to disable.
 #tunnelTimeout = 2m
+# Close idle SOCKS5 UDP associations and release their relay ports. This is
+# separate from tunnelTimeout so it can exceed the client's UDP NAT timeout.
+# Set to 0s to disable.
+#socks5UDPTimeout = 5m
 
 # Detect SSL error based on client close connection speed, only effective for
 # Chrome.

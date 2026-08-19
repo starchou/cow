@@ -31,6 +31,7 @@ const (
 	socks5StatusCmdUnsupported  = 0x07
 	socks5StatusAtypUnsupported = 0x08
 	socks5UDPBufferSize         = 65535
+	defaultSocks5UDPIdleTimeout = 5 * time.Minute
 )
 
 type socksProxy struct {
@@ -699,20 +700,53 @@ func buildSocks5UDPDatagram(addr string, payload []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func refreshSocks5UDPReadDeadline(timeout time.Duration, conn *net.UDPConn) error {
+	if timeout <= 0 {
+		return nil
+	}
+	return conn.SetReadDeadline(time.Now().Add(timeout))
+}
+
 func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
 	relayConn, err := listenSocks5UDPRelay(c.LocalAddr())
 	if err != nil {
 		c.writeSocks5Reply(socksReplyFromError(err), nil)
 		return err
 	}
-	defer relayConn.Close()
-
 	outConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
+		relayConn.Close()
 		c.writeSocks5Reply(socksReplyFromError(err), nil)
 		return err
 	}
-	defer outConn.Close()
+
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			// Publish shutdown before closing sockets so blocked readers recognize
+			// the resulting errors as an expected association close.
+			close(done)
+			c.Conn.Close()
+			relayConn.Close()
+			outConn.Close()
+		})
+	}
+	var workers sync.WaitGroup
+	defer func() {
+		closeAll()
+		workers.Wait()
+	}()
+	idleTimeout := config.Socks5UDPTimeout
+	var deadlineMu sync.Mutex
+	touch := func() error {
+		deadlineMu.Lock()
+		defer deadlineMu.Unlock()
+		// The relay read loop owns association expiry and closes every socket.
+		// Refreshing one deadline avoids a timer and two deadline updates per
+		// packet while activity from either direction still keeps it alive.
+		return refreshSocks5UDPReadDeadline(idleTimeout, relayConn)
+	}
 
 	udpLocal, _ := relayConn.LocalAddr().(*net.UDPAddr)
 	if err := c.writeSocks5Reply(socks5StatusSucceeded, socks5UDPReplyAddr(c.LocalAddr(), udpLocal)); err != nil {
@@ -721,18 +755,13 @@ func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
 	if debug {
 		debug.Printf("cli(%s) socks5 udp associate %s -> relay %s\n", c.RemoteAddr(), req.hostPort, relayConn.LocalAddr())
 	}
-
-	done := make(chan struct{})
-	var closeOnce sync.Once
-	closeAll := func() {
-		closeOnce.Do(func() {
-			relayConn.Close()
-			outConn.Close()
-			close(done)
-		})
+	if err := touch(); err != nil {
+		return err
 	}
 
+	workers.Add(2)
 	go func() {
+		defer workers.Done()
 		var one [1]byte
 		for {
 			if _, err := c.bufRd.Read(one[:]); err != nil {
@@ -760,6 +789,7 @@ func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
 	}
 
 	go func() {
+		defer workers.Done()
 		buf := make([]byte, socks5UDPBufferSize)
 		for {
 			n, remoteAddr, err := outConn.ReadFromUDP(buf)
@@ -769,10 +799,9 @@ func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
 					return
 				default:
 				}
-				if debug {
-					debug.Printf("cli(%s) socks5 udp read remote %v\n", c.RemoteAddr(), err)
-				}
-				continue
+				debug.Printf("cli(%s) socks5 udp read remote %v\n", c.RemoteAddr(), err)
+				closeAll()
+				return
 			}
 			addr := getClientAddr()
 			if addr == nil {
@@ -794,6 +823,11 @@ func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
 				if debug {
 					debug.Printf("cli(%s) socks5 udp write client %v\n", c.RemoteAddr(), err)
 				}
+				continue
+			}
+			if err := touch(); err != nil {
+				closeAll()
+				return
 			}
 		}
 	}()
@@ -806,6 +840,10 @@ func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
 			case <-done:
 				return nil
 			default:
+			}
+			if isErrTimeout(err) {
+				debug.Printf("cli(%s) close idle socks5 udp association after %v\n", c.RemoteAddr(), idleTimeout)
+				return nil
 			}
 			return err
 		}
@@ -837,6 +875,14 @@ func (c *clientConn) serveSocksUDPAssociate(req socks5ParsedRequest) error {
 				debug.Printf("cli(%s) forward socks5 udp to %s: %v\n", c.RemoteAddr(), remoteAddr, err)
 			}
 			continue
+		}
+		if err := touch(); err != nil {
+			select {
+			case <-done:
+				return nil
+			default:
+			}
+			return err
 		}
 	}
 }

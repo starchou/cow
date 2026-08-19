@@ -1,3 +1,7 @@
+0.9.11 (2026-08-19)
+    * Close idle SOCKS5 UDP associations and release relay ports
+    * Add socks5UDPTimeout config option (default 5m; 0s disables cleanup)
+
 0.9.10 (2026-06-06)
     * Close idle CONNECT/SOCKS tunnel connections after tunnelTimeout
     * Add tunnelTimeout config option
