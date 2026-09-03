@@ -143,6 +143,25 @@ func TestParseTunnelTimeout(t *testing.T) {
 	}
 }
 
+func TestParseCapture(t *testing.T) {
+	oldConfig := config
+	defer func() { config = oldConfig }()
+
+	initConfig("/tmp/cow/rc")
+	if config.Capture {
+		t.Fatal("capture should be disabled by default")
+	}
+	if config.CaptureDir != "/tmp/cow/capture" {
+		t.Fatalf("unexpected default capture dir: %s", config.CaptureDir)
+	}
+	parser := configParser{}
+	parser.ParseCapture("true")
+	parser.ParseCaptureDir("~/captures")
+	if !config.Capture || config.CaptureDir == "~/captures" {
+		t.Fatalf("capture config was not parsed: %+v", config)
+	}
+}
+
 func TestParseSocks5UDPTimeout(t *testing.T) {
 	oldConfig := config
 	defer func() { config = oldConfig }()

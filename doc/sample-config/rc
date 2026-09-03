@@ -34,6 +34,14 @@ listen = http://0.0.0.0:7777
 # 日志文件路径，如不指定则输出到 stdout
 #logFile =
 
+# 抓取并保存 HTTP、HTTPS、WebSocket 和安全 WebSocket 流量。默认关闭。
+# 开启后，日志按“目标文件名_日期时间.log”写入 captureDir。
+# HTTPS/WSS 会在 captureDir 自动生成 cow-ca.crt 和 cow-ca.key；客户端需信任
+# cow-ca.crt。也可通过 http://<代理地址>/cow-ca.crt 下载证书。
+# 注意：日志包含请求体、响应体、Cookie、Authorization 等敏感内容。
+#capture = false
+#captureDir = ~/.cow/capture
+
 # COW 默认仅对被墙网站使用二级代理
 # 下面选项设置为 true 后，所有网站都通过二级代理访问
 #alwaysProxy = false

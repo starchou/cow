@@ -1,3 +1,7 @@
+1.0.1 (2026-09-03)
+    * Add optional HTTP(S) and WebSocket traffic capture
+    * Generate a local capture CA and expose its public certificate for download
+
 0.9.11 (2026-08-19)
     * Close idle SOCKS5 UDP associations and release relay ports
     * Add socks5UDPTimeout config option (default 5m; 0s disables cleanup)

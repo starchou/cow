@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,8 @@ func TestParseRequestURI(t *testing.T) {
 		{"http://mail.g.com:80/", &URL{"mail.g.com:80", "mail.g.com", "80", "g.com", "/"}},
 		{"http://g.com:80/ncr", &URL{"g.com:80", "g.com", "80", "g.com", "/ncr"}},
 		{"https://g.com/ncr/tree", &URL{"g.com:443", "g.com", "443", "g.com", "/ncr/tree"}},
+		{"ws://socket.g.com/chat", &URL{"socket.g.com:80", "socket.g.com", "80", "g.com", "/chat"}},
+		{"wss://socket.g.com/chat", &URL{"socket.g.com:443", "socket.g.com", "443", "g.com", "/chat"}},
 		{"www.g.com.hk:80/", &URL{"www.g.com.hk:80", "www.g.com.hk", "80", "g.com.hk", "/"}},
 		{"g.com.jp:80", &URL{"g.com.jp:80", "g.com.jp", "80", "g.com.jp", ""}},
 		{"g.com", &URL{"g.com:80", "g.com", "80", "g.com", ""}},
@@ -60,6 +63,33 @@ func TestParseRequestURI(t *testing.T) {
 		if url.Path != td.url.Path {
 			t.Error(td.rawurl, "parsed path wrong:", td.url.Path, "got", url.Path)
 		}
+	}
+}
+
+func TestParseWebSocketUpgrade(t *testing.T) {
+	client, peer := net.Pipe()
+	defer peer.Close()
+	c := newClientConn(client, newHttpProxy("127.0.0.1:7777", ""))
+	defer c.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := peer.Write([]byte("GET ws://example.com/chat HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"))
+		done <- err
+	}()
+	var r Request
+	if err := parseRequest(c, &r); err != nil {
+		t.Fatal(err)
+	}
+	defer r.releaseBuf()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !r.isWebSocket() || r.URL.Port != "80" {
+		t.Fatalf("websocket request was not recognized: %+v", r)
+	}
+	if got := string(r.rawRequest()); !strings.Contains(got, "Connection: Upgrade\r\nUpgrade: websocket\r\n") {
+		t.Fatalf("websocket upgrade headers were not forwarded:\n%s", got)
 	}
 }
 

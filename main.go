@@ -47,6 +47,9 @@ func main() {
 
 	initSelfListenAddr()
 	initLog()
+	if err := initCapture(); err != nil {
+		Fatal("initialize traffic capture:", err)
+	}
 	initAuth()
 	initSiteStat()
 	initPAC() // initPAC uses siteStat, so must init after site stat

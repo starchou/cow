@@ -177,6 +177,9 @@ func (hp *httpProxy) Serve(wg *sync.WaitGroup, quit <-chan struct{}) {
 		pacURL = fmt.Sprintf("http://%s/pac", hp.addrInPAC)
 	}
 	info.Printf("COW %s listen http %s, PAC url %s\n", version, hp.addr, pacURL)
+	if config.Capture {
+		info.Printf("capture CA download URL %s%s\n", strings.TrimSuffix(pacURL, "/pac"), captureCAURLPath)
+	}
 
 	for {
 		conn, err := ln.Accept()
@@ -378,6 +381,12 @@ func (c *clientConn) serveSelfURL(r *Request) (err error) {
 		// client connection.
 		return errPageSent
 	}
+	if r.URL.Path == captureCAURLPath && config.Capture {
+		if err := sendCaptureCA(c); err != nil {
+			return err
+		}
+		return errPageSent
+	}
 end:
 	sendErrorPage(c, "404 not found", "Page not found",
 		genErrMsg(r, nil, "Serving request to COW proxy."))
@@ -530,6 +539,13 @@ func (c *clientConn) serve() {
 			// actually it will close here.
 			return
 		}
+		if !r.isConnect {
+			protocol := "http"
+			if r.isWebSocket() {
+				protocol = "ws"
+			}
+			r.capture = startTrafficCapture(&r, protocol)
+		}
 
 	retry:
 		r.tryOnce()
@@ -549,8 +565,10 @@ func (c *clientConn) serve() {
 					debug.Printf("cli(%s) skip request body %v\n", c.RemoteAddr(), &r)
 					sendBody(SinkWriter{}, c.bufRd, int(r.ContLen), r.Chunking)
 				}
+				r.capture.close()
 				continue
 			}
+			r.capture.close()
 			return
 		}
 
@@ -560,6 +578,7 @@ func (c *clientConn) serve() {
 			if c.shouldRetry(&r, sv, err) {
 				goto retry
 			}
+			r.capture.close()
 			// debug.Printf("doConnect %s to %s done\n", c.RemoteAddr(), r.URL.HostPort)
 			return
 		}
@@ -571,12 +590,15 @@ func (c *clientConn) serve() {
 			if c.shouldRetry(&r, sv, err) {
 				goto retry
 			} else if err == errPageSent && (!r.hasBody() || r.hasSent()) {
+				r.capture.close()
 				// Can only continue if request has no body, or request body
 				// has been read.
 				continue
 			}
+			r.capture.close()
 			return
 		}
+		r.capture.close()
 		// Put server connection to pool, so other clients can use it.
 		_, isCowConn := sv.Conn.(cowConn)
 		if rp.ConnectionKeepAlive || isCowConn {
@@ -683,6 +705,9 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 		return c.handleServerReadError(r, sv, err, "parse response")
 	}
 	dbgPrintRep(c, r, rp)
+	if r.capture != nil {
+		r.capture.writeSection("server -> client response", rp.rawResponse())
+	}
 	// After have received the first reponses from the server, we consider
 	// ther server as real instead of fake one caused by wrong DNS reply. So
 	// don't time out later.
@@ -695,9 +720,16 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 	}
 
 	rp.releaseBuf()
+	if rp.Status == 101 && r.isWebSocket() {
+		return sv.tunnel(r, c)
+	}
 
 	if rp.hasBody(r.Method) {
-		if err = sendBody(c, sv.bufRd, int(rp.ContLen), rp.Chunking); err != nil {
+		var bodyWriter io.Writer = c
+		if r.capture != nil {
+			bodyWriter = io.MultiWriter(c, r.capture.writer("server -> client body"))
+		}
+		if err = sendBody(bodyWriter, sv.bufRd, int(rp.ContLen), rp.Chunking); err != nil {
 			if debug {
 				debug.Printf("cli(%s) send body %v\n", c.RemoteAddr(), err)
 			}
@@ -1090,6 +1122,10 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request, activity *tunn
 	const directThreshold = 8192
 	readTimeoutSet := false
 	var reader io.Reader = sv
+	var captureWriter io.Writer
+	if r.capture != nil {
+		captureWriter = r.capture.chunkWriter("server -> client websocket/tunnel data")
+	}
 	if sv.bufRd != nil {
 		reader = sv.bufRd
 	}
@@ -1116,6 +1152,9 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request, activity *tunn
 		}
 		activity.touch()
 		total += n
+		if captureWriter != nil {
+			_, _ = captureWriter.Write(buf[:n])
+		}
 		if _, err = c.Write(buf[0:n]); err != nil {
 			// debug.Printf("copyServer2Client write data: %v\n", err)
 			return
@@ -1174,6 +1213,10 @@ func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped not
 	}()
 
 	var n int
+	var captureWriter io.Writer
+	if r.capture != nil {
+		captureWriter = r.capture.chunkWriter("client -> server websocket/tunnel data")
+	}
 
 	if r.isRetry() {
 		if debug {
@@ -1192,6 +1235,9 @@ func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped not
 		n = c.bufRd.Buffered()
 		if n > 0 {
 			buffered, _ := c.bufRd.Peek(n) // should not return error
+			if captureWriter != nil {
+				_, _ = captureWriter.Write(buffered)
+			}
 			if _, err = w.Write(buffered); err != nil {
 				// debug.Printf("cli->srv write buffered err: %v\n", err)
 				return
@@ -1236,6 +1282,9 @@ func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped not
 			return
 		}
 		activity.touch()
+		if captureWriter != nil {
+			_, _ = captureWriter.Write(buf[:n])
+		}
 
 		// copyServer2Client will detect write to closed server. Just store client content for retry.
 		if _, err = w.Write(buf[:n]); err != nil {
@@ -1259,6 +1308,9 @@ var connEstablished = []byte("HTTP/1.1 200 Tunnel established\r\n\r\n")
 // Do HTTP CONNECT
 func (sv *serverConn) doConnect(r *Request, c *clientConn) (err error) {
 	r.state = rsCreated
+	if config.Capture {
+		return sv.doCaptureConnect(r, c)
+	}
 
 	_, isHttpConn := sv.Conn.(httpConn)
 	_, isCowConn := sv.Conn.(cowConn)
@@ -1358,7 +1410,11 @@ func (sv *serverConn) sendRequestBody(r *Request, c *clientConn) (err error) {
 		return
 	}
 
-	err = sendBody(newServerWriter(r, sv), c.bufRd, int(r.ContLen), r.Chunking)
+	var bodyWriter io.Writer = newServerWriter(r, sv)
+	if r.capture != nil {
+		bodyWriter = io.MultiWriter(bodyWriter, r.capture.writer("client -> server body"))
+	}
+	err = sendBody(bodyWriter, c.bufRd, int(r.ContLen), r.Chunking)
 	if err != nil {
 		errl.Printf("cli(%s) send request body error %v %s\n", c.RemoteAddr(), err, r)
 		if isErrOpWrite(err) {

@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version               = "0.9.11"
+	version               = "1.0.1"
 	defaultListenAddr     = "127.0.0.1:7777"
 	defaultEstimateTarget = "example.com"
 )
@@ -44,6 +44,8 @@ var defaultTunnelAllowedPort = []string{
 type Config struct {
 	RcFile      string          // config file
 	LogFile     string          // path for log file
+	Capture     bool            // save HTTP/WebSocket traffic to CaptureDir
+	CaptureDir  string          // directory for traffic logs and generated CA files
 	AlwaysProxy bool            // whether we should alwyas use parent proxy
 	LoadBalance LoadBalanceMode // select load balance mode
 
@@ -98,9 +100,11 @@ func initConfig(rcFile string) {
 	config.BlockedFile = path.Join(config.dir, blockedFname)
 	config.DirectFile = path.Join(config.dir, directFname)
 	config.StatFile = path.Join(config.dir, statFname)
+	config.CaptureDir = path.Join(config.dir, "capture")
 
 	config.DetectSSLErr = false
 	config.AlwaysProxy = false
+	config.Capture = false
 
 	config.AuthTimeout = 2 * time.Hour
 	config.DialTimeout = defaultDialTimeout
@@ -419,6 +423,14 @@ func (p configParser) ParseListen(val string) {
 
 func (p configParser) ParseLogFile(val string) {
 	config.LogFile = expandTilde(val)
+}
+
+func (p configParser) ParseCapture(val string) {
+	config.Capture = parseBool(val, "capture")
+}
+
+func (p configParser) ParseCaptureDir(val string) {
+	config.CaptureDir = expandTilde(val)
 }
 
 func (p configParser) ParseAddrInPAC(val string) {

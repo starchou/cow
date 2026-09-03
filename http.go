@@ -36,6 +36,7 @@ type Header struct {
 	ConnectionKeepAlive bool
 	ExpectContinue      bool
 	Host                string
+	Upgrade             string
 }
 
 type rqState byte
@@ -64,6 +65,7 @@ type Request struct {
 	partial   bool // whether contains only partial request data
 	state     rqState
 	tryCnt    byte
+	capture   *trafficCapture
 }
 
 // Assume keep-alive request by default.
@@ -280,7 +282,8 @@ func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
 	} else {
 		scheme = rawurl[:id]
 		ASCIIToLowerInplace(scheme) // it's ok to lower case scheme
-		if !bytes.Equal(scheme, []byte("http")) && !bytes.Equal(scheme, []byte("https")) {
+		if !bytes.Equal(scheme, []byte("http")) && !bytes.Equal(scheme, []byte("https")) &&
+			!bytes.Equal(scheme, []byte("ws")) && !bytes.Equal(scheme, []byte("wss")) {
 			errl.Printf("%s protocol not supported\n", scheme)
 			return nil, errors.New("protocol not supported")
 		}
@@ -302,7 +305,7 @@ func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
 	host, port, err := net.SplitHostPort(hostport)
 	if err != nil { // missing port
 		host = hostport
-		if len(scheme) == 4 {
+		if bytes.Equal(scheme, []byte("http")) || bytes.Equal(scheme, []byte("ws")) {
 			hostport = net.JoinHostPort(host, "80")
 			port = "80"
 		} else {
@@ -352,6 +355,7 @@ var headerParser = map[string]HeaderParserFunc{
 	headerProxyConnection:    (*Header).parseConnection,
 	headerTransferEncoding:   (*Header).parseTransferEncoding,
 	headerTrailer:            (*Header).parseTrailer,
+	headerUpgrade:            (*Header).parseUpgrade,
 }
 
 var hopByHopHeader = map[string]bool{
@@ -418,6 +422,11 @@ func (h *Header) parseKeepAlive(s []byte) (err error) {
 
 func (h *Header) parseProxyAuthorization(s []byte) error {
 	h.ProxyAuthorization = string(s)
+	return nil
+}
+
+func (h *Header) parseUpgrade(s []byte) error {
+	h.Upgrade = strings.ToLower(string(s))
 	return nil
 }
 
@@ -635,7 +644,9 @@ func parseRequest(c *clientConn, r *Request) (err error) {
 	if r.Chunking {
 		r.raw.WriteString(fullHeaderTransferEncoding)
 	}
-	if r.ConnectionKeepAlive {
+	if r.Upgrade != "" {
+		r.raw.WriteString("Connection: Upgrade\r\nUpgrade: " + r.Upgrade + CRLF)
+	} else if r.ConnectionKeepAlive {
 		r.raw.WriteString(fullHeaderConnectionKeepAlive)
 	} else {
 		r.raw.WriteString(fullHeaderConnectionClose)
@@ -743,7 +754,9 @@ func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
 	}
 	// Whether COW should respond with keep-alive depends on client request,
 	// not server response.
-	if r.ConnectionKeepAlive {
+	if rp.Upgrade != "" {
+		rp.raw.WriteString("Connection: Upgrade\r\nUpgrade: " + rp.Upgrade + CRLF)
+	} else if r.ConnectionKeepAlive {
 		rp.raw.WriteString(fullHeaderConnectionKeepAlive)
 		rp.raw.WriteString(fullKeepAliveHeader)
 	} else {
@@ -752,6 +765,10 @@ func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
 	rp.raw.WriteString(CRLF)
 
 	return nil
+}
+
+func (r *Request) isWebSocket() bool {
+	return strings.EqualFold(r.Upgrade, "websocket")
 }
 
 func unquote(s string) string {

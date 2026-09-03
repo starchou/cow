@@ -37,6 +37,14 @@ listen = http://0.0.0.0:7777
 # Log file path, defaults to stdout
 #logFile =
 
+# Capture HTTP, HTTPS, WebSocket, and secure WebSocket traffic. Disabled by default.
+# Logs use the name "target_filename_datetime.log" under captureDir.
+# When enabled, cow-ca.crt and cow-ca.key are generated in captureDir. Trust
+# cow-ca.crt on the client, or download it from http://<proxy-address>/cow-ca.crt.
+# Warning: capture logs include bodies, cookies, Authorization headers, and other secrets.
+#capture = false
+#captureDir = ~/.cow/capture
+
 # By default, COW only uses parent proxy if the site is blocked.
 # If the following option is true, COW will use parent proxy for all sites.
 #alwaysProxy = false
