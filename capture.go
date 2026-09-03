@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ const (
 	captureCACertName = "cow-ca.crt"
 	captureCAKeyName  = "cow-ca.key"
 	captureCAURLPath  = "/cow-ca.crt"
+	captureLogsDir    = "logs"
 )
 
 var captureCA = struct {
@@ -59,6 +61,9 @@ func initCapture() error {
 	}
 	config.CaptureDir = dir
 	if err = os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Join(dir, captureLogsDir), 0700); err != nil {
 		return err
 	}
 
@@ -200,7 +205,7 @@ func startTrafficCapture(r *Request, protocol string) *trafficCapture {
 	}
 	name := cleanCaptureName(r.URL.Host + "_" + base)
 	name += "_" + time.Now().Format("20060102_150405.000000000") + ".log"
-	f, err := os.OpenFile(filepath.Join(config.CaptureDir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(filepath.Join(config.CaptureDir, captureLogsDir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		errl.Printf("create traffic capture: %v\n", err)
 		return nil
@@ -318,25 +323,144 @@ func (sv *serverConn) doCaptureConnect(r *Request, c *clientConn) error {
 
 	setConnReadTimeout(c.Conn, config.DialTimeout, "detect TLS capture")
 	first, err := c.bufRd.Peek(1)
+	isHTTP := err == nil && first[0] == 0x16 && captureTLSLooksHTTP(c.bufRd, r.URL.Port)
 	unsetConnReadTimeout(c.Conn, "detect TLS capture")
 	if err != nil {
 		sv.Close()
 		return err
 	}
-	if first[0] != 0x16 {
-		if r.capture == nil {
-			r.capture = startTrafficCapture(r, "connect")
-		}
+	if !isHTTP {
 		return sv.tunnel(r, c)
 	}
+	return sv.captureTLS(c, r.URL)
+}
 
+func (sv *serverConn) doCaptureSocks(r *Request, c *clientConn) error {
+	setConnReadTimeout(c.Conn, config.DialTimeout, "detect SOCKS5 capture protocol")
+	first, err := c.bufRd.Peek(1)
+	if err != nil {
+		unsetConnReadTimeout(c.Conn, "detect SOCKS5 capture protocol")
+		return sv.tunnel(r, c)
+	}
+	if first[0] == 0x16 && captureTLSLooksHTTP(c.bufRd, r.URL.Port) {
+		unsetConnReadTimeout(c.Conn, "detect SOCKS5 capture protocol")
+		return sv.captureTLS(c, r.URL)
+	}
+	unsetConnReadTimeout(c.Conn, "detect SOCKS5 capture protocol")
+	if first[0] == 0x16 || !captureLooksLikeHTTP(c.bufRd, first[0]) {
+		return sv.tunnel(r, c)
+	}
+	sv.tunneled = true
+	sv.updateVisit()
+	defer sv.Close()
+	return sv.serveCapturedHTTP(c, r.URL, false)
+}
+
+func captureLooksLikeHTTP(reader *bufio.Reader, first byte) bool {
+	switch first {
+	case 'G', 'P', 'H', 'D', 'O', 'T', 'C':
+	default:
+		return false
+	}
+	prefix, err := reader.Peek(4)
+	if err != nil {
+		return false
+	}
+	switch string(prefix) {
+	case "GET ", "PUT ":
+		return true
+	case "POST", "PATC", "HEAD", "DELE", "OPTI", "TRAC", "CONN":
+	default:
+		return false
+	}
+	method, err := reader.PeekSlice(' ')
+	return err == nil && isCaptureHTTPMethod(string(method[:len(method)-1]))
+}
+
+func isCaptureHTTPMethod(method string) bool {
+	switch method {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT":
+		return true
+	default:
+		return false
+	}
+}
+
+func captureTLSLooksHTTP(reader *bufio.Reader, port string) bool {
+	header, err := reader.Peek(5)
+	if err != nil || header[0] != 0x16 {
+		return false
+	}
+	record, err := reader.Peek(5 + int(binary.BigEndian.Uint16(header[3:5])))
+	if err == nil && clientHelloHasHTTPALPN(record[5:]) {
+		return true
+	}
+	return port == "443" || port == "8443"
+}
+
+func clientHelloHasHTTPALPN(hello []byte) bool {
+	if len(hello) < 39 || hello[0] != 1 {
+		return false
+	}
+	handshakeLen := int(hello[1])<<16 | int(hello[2])<<8 | int(hello[3])
+	if handshakeLen+4 > len(hello) {
+		return false
+	}
+	pos := 38
+	if pos+1 > len(hello) {
+		return false
+	}
+	pos += 1 + int(hello[pos])
+	if pos+2 > len(hello) {
+		return false
+	}
+	pos += 2 + int(binary.BigEndian.Uint16(hello[pos:pos+2]))
+	if pos+1 > len(hello) {
+		return false
+	}
+	pos += 1 + int(hello[pos])
+	if pos+2 > len(hello) {
+		return false
+	}
+	extensionsEnd := pos + 2 + int(binary.BigEndian.Uint16(hello[pos:pos+2]))
+	pos += 2
+	if extensionsEnd > len(hello) {
+		return false
+	}
+	for pos+4 <= extensionsEnd {
+		typeID := binary.BigEndian.Uint16(hello[pos : pos+2])
+		size := int(binary.BigEndian.Uint16(hello[pos+2 : pos+4]))
+		pos += 4
+		if pos+size > extensionsEnd {
+			return false
+		}
+		if typeID == 16 && size >= 2 {
+			protocols := hello[pos+2 : pos+size]
+			for len(protocols) > 0 {
+				n := int(protocols[0])
+				if n+1 > len(protocols) {
+					return false
+				}
+				protocol := string(protocols[1 : n+1])
+				if protocol == "h2" || protocol == "http/1.1" {
+					return true
+				}
+				protocols = protocols[n+1:]
+			}
+		}
+		pos += size
+	}
+	return false
+}
+
+func (sv *serverConn) captureTLS(c *clientConn, target *URL) error {
 	sv.releaseBuf()
-	serverTLS := tls.Client(sv.Conn, newCaptureUpstreamTLSConfig(r.URL.Host))
+	serverTLS := tls.Client(sv.Conn, newCaptureUpstreamTLSConfig(target.Host))
 	_ = serverTLS.SetDeadline(time.Now().Add(config.DialTimeout))
-	if err = serverTLS.Handshake(); err != nil {
+	if err := serverTLS.Handshake(); err != nil {
 		sv.Close()
 		if sv.maybeFake() && maybeBlocked(err) {
-			siteStat.TempBlocked(r.URL)
+			siteStat.TempBlocked(target)
 			return RetryError{err}
 		}
 		return fmt.Errorf("server TLS handshake: %w", err)
@@ -346,7 +470,7 @@ func (sv *serverConn) doCaptureConnect(r *Request, c *clientConn) error {
 	sv.Conn = serverTLS
 	defer sv.Close()
 
-	cert, err := captureCertificate(r.URL.Host)
+	cert, err := captureCertificate(target.Host)
 	if err != nil {
 		return err
 	}
@@ -367,14 +491,14 @@ func (sv *serverConn) doCaptureConnect(r *Request, c *clientConn) error {
 	c.buf = httpBuf.Get()
 	c.bufRd = bufio.NewReaderFromBuf(clientTLS, c.buf)
 
-	err = sv.serveCapturedTLS(c, r.URL)
+	err = sv.serveCapturedHTTP(c, target, true)
 	if isErrRetry(err) {
 		return fmt.Errorf("captured TLS connection cannot retry: %w", err)
 	}
 	return err
 }
 
-func (sv *serverConn) serveCapturedTLS(c *clientConn, target *URL) error {
+func (sv *serverConn) serveCapturedHTTP(c *clientConn, target *URL, secure bool) error {
 	for {
 		var r Request
 		var rp Response
@@ -387,9 +511,15 @@ func (sv *serverConn) serveCapturedTLS(c *clientConn, target *URL) error {
 		}
 		path := r.URL.Path
 		r.URL = &URL{HostPort: target.HostPort, Host: target.Host, Port: target.Port, Domain: target.Domain, Path: path}
-		protocol := "https"
+		protocol := "http"
+		if secure {
+			protocol = "https"
+		}
 		if r.isWebSocket() {
-			protocol = "wss"
+			protocol = "ws"
+			if secure {
+				protocol = "wss"
+			}
 		}
 		r.capture = startTrafficCapture(&r, protocol)
 		err := sv.doRequest(c, &r, &rp)

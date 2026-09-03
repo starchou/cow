@@ -22,6 +22,9 @@ func TestCaptureGeneratesCAAndWritesTraffic(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(config.CaptureDir, captureCACertName)); err != nil {
 		t.Fatal(err)
 	}
+	if info, err := os.Stat(filepath.Join(config.CaptureDir, captureLogsDir)); err != nil || !info.IsDir() {
+		t.Fatalf("capture logs directory was not created: %v", err)
+	}
 	keyInfo, err := os.Stat(filepath.Join(config.CaptureDir, captureCAKeyName))
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +76,7 @@ func TestCaptureGeneratesCAAndWritesTraffic(t *testing.T) {
 	_, _ = w.Write([]byte("load"))
 	capture.close()
 
-	logs, err := filepath.Glob(filepath.Join(config.CaptureDir, "example.com_items.json_*.log"))
+	logs, err := filepath.Glob(filepath.Join(config.CaptureDir, captureLogsDir, "example.com_items.json_*.log"))
 	if err != nil || len(logs) != 1 {
 		t.Fatalf("expected one timestamped log, got %v, %v", logs, err)
 	}

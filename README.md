@@ -17,10 +17,18 @@ capture = true
 captureDir = ~/.cow/capture
 ```
 
-Each request is saved as `host_target-filename_YYYYMMDD_HHMMSS.nanoseconds.log`.
+Each request is saved under `captureDir/logs` as
+`host_target-filename_YYYYMMDD_HHMMSS.nanoseconds.log`. The `logs` directory is
+created automatically.
 WebSocket data is appended to its handshake log in both directions. HTTPS and
 WSS are decrypted locally with a generated CA. On first start, COW creates
 `cow-ca.crt` and `cow-ca.key` in `captureDir`; keep the private key secret.
+
+SOCKS5 connections are captured when they contain a recognized HTTP method or
+a TLS ClientHello advertising HTTP. TLS without ALPN is captured on ports 443
+and 8443. Other SOCKS5 protocols remain byte-for-byte transparent. With a
+SOCKS5-only listener, copy `cow-ca.crt` from `captureDir`; add an HTTP listener
+if the certificate also needs to be downloadable over `/cow-ca.crt`.
 
 Download the public CA from `http://<proxy-address>/cow-ca.crt`, then install
 it as a trusted root on the client. For example on macOS:

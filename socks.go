@@ -951,7 +951,8 @@ func (sv *serverConn) tunnel(r *Request, c *clientConn) (err error) {
 	activity := newTunnelWatchdog(config.TunnelTimeout, c.Conn, sv.Conn)
 	defer activity.stop()
 	go func() {
-		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, done, activity)
+		defer close(done)
+		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, activity)
 		sv.Close()
 	}()
 
@@ -961,6 +962,8 @@ func (sv *serverConn) tunnel(r *Request, c *clientConn) (err error) {
 		<-done
 	} else {
 		c.Conn.Close()
+		sv.Conn.Close()
+		<-done
 	}
 	if isErrRetry(cli2srvErr) {
 		return cli2srvErr
@@ -976,6 +979,9 @@ func (sv *serverConn) doSocksConnect(r *Request, c *clientConn) error {
 	}
 	if err := c.writeSocks5Reply(socks5StatusSucceeded, sv.LocalAddr()); err != nil {
 		return err
+	}
+	if config.Capture {
+		return sv.doCaptureSocks(r, c)
 	}
 	return sv.tunnel(r, c)
 }

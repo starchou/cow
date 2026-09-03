@@ -93,6 +93,7 @@ type serverConn struct {
 	willCloseOn time.Time
 	siteInfo    *VisitCnt
 	visited     bool
+	tunneled    bool // parent CONNECT is established; send origin-form requests
 }
 
 type clientConn struct {
@@ -1199,7 +1200,7 @@ func (sw *serverWriter) Write(p []byte) (int, error) {
 	return sw.sv.Write(p)
 }
 
-func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped notification, done chan struct{}, activity *tunnelWatchdog) (err error) {
+func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped notification, activity *tunnelWatchdog) (err error) {
 	// sv.maybeFake may change during execution in this function.
 	// So need a variable to record the whether timeout is set.
 	deadlineIsSet := false
@@ -1209,7 +1210,6 @@ func copyClient2Server(c *clientConn, sv *serverConn, r *Request, srvStopped not
 			// timeout on retry. Note c.Conn maybe closed when calling this.
 			unsetConnReadTimeout(c.Conn, "cli->srv after err")
 		}
-		close(done)
 	}()
 
 	var n int
@@ -1338,8 +1338,9 @@ func (sv *serverConn) doConnect(r *Request, c *clientConn) (err error) {
 	activity := newTunnelWatchdog(config.TunnelTimeout, c.Conn, sv.Conn)
 	defer activity.stop()
 	go func() {
+		defer close(done)
 		// debug.Printf("doConnect: cli(%s)->srv(%s)\n", c.RemoteAddr(), r.URL.HostPort)
-		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, done, activity)
+		cli2srvErr = copyClient2Server(c, sv, r, srvStopped, activity)
 		// Close sv to force read from server in copyServer2Client return.
 		// Note: there's no other code closing the server connection for CONNECT.
 		sv.Close()
@@ -1354,6 +1355,8 @@ func (sv *serverConn) doConnect(r *Request, c *clientConn) (err error) {
 	} else {
 		// close client connection to force read from client in copyClient2Server return
 		c.Conn.Close()
+		sv.Conn.Close()
+		<-done
 	}
 	if isErrRetry(cli2srvErr) {
 		return cli2srvErr
@@ -1388,9 +1391,11 @@ func (sv *serverConn) sendHTTPProxyRequestHeader(r *Request, c *clientConn) (err
 
 func (sv *serverConn) sendRequestHeader(r *Request, c *clientConn) (err error) {
 	// Send request to the server
-	switch sv.Conn.(type) {
-	case httpConn, cowConn:
-		return sv.sendHTTPProxyRequestHeader(r, c)
+	if !sv.tunneled {
+		switch sv.Conn.(type) {
+		case httpConn, cowConn:
+			return sv.sendHTTPProxyRequestHeader(r, c)
+		}
 	}
 	/*
 		if bool(debug) && verbose {

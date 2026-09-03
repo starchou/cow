@@ -35,9 +35,11 @@ listen = http://0.0.0.0:7777
 #logFile =
 
 # 抓取并保存 HTTP、HTTPS、WebSocket 和安全 WebSocket 流量。默认关闭。
-# 开启后，日志按“目标文件名_日期时间.log”写入 captureDir。
+# 开启后会自动创建 captureDir/logs，日志按“目标文件名_日期时间.log”写入其中。
 # HTTPS/WSS 会在 captureDir 自动生成 cow-ca.crt 和 cow-ca.key；客户端需信任
 # cow-ca.crt。也可通过 http://<代理地址>/cow-ca.crt 下载证书。
+# SOCKS5 连接会自动识别并抓取 HTTP(S)/WS(S)，其他协议仍透明转发。若只配置
+# SOCKS5 监听，请从 captureDir 复制证书；需要 HTTP 下载地址时再增加 HTTP 监听。
 # 注意：日志包含请求体、响应体、Cookie、Authorization 等敏感内容。
 #capture = false
 #captureDir = ~/.cow/capture

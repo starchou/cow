@@ -1,3 +1,8 @@
+1.0.2 (2026-09-03)
+    * Capture HTTP(S) and WebSocket traffic through SOCKS5 listeners
+    * Store capture logs under captureDir/logs
+    * Wait for tunnel copy goroutines to stop before returning
+
 1.0.1 (2026-09-03)
     * Add optional HTTP(S) and WebSocket traffic capture
     * Generate a local capture CA and expose its public certificate for download
