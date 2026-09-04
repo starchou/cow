@@ -1,3 +1,9 @@
+1.0.4 (2026-09-03)
+    * Load the capture domain whitelist from a newline-separated file
+
+1.0.3 (2026-09-03)
+    * Limit capture and TLS interception to an explicit domain whitelist
+
 1.0.2 (2026-09-03)
     * Capture HTTP(S) and WebSocket traffic through SOCKS5 listeners
     * Store capture logs under captureDir/logs

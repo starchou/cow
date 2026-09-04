@@ -46,6 +46,8 @@ listen = http://0.0.0.0:7777
 # Warning: capture logs include bodies, cookies, Authorization headers, and other secrets.
 #capture = false
 #captureDir = ~/.cow/capture
+# One domain per line; blank/# lines are ignored. Subdomains match; * means all.
+#captureDomainFile = ~/.cow/domain.list
 
 # By default, COW only uses parent proxy if the site is blocked.
 # If the following option is true, COW will use parent proxy for all sites.

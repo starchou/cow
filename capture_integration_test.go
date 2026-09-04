@@ -34,6 +34,10 @@ func TestTrafficCaptureEndToEnd(t *testing.T) {
 	initConfig(filepath.Join(dir, "rc"))
 	config.Capture = true
 	config.CaptureDir = filepath.Join(dir, "capture")
+	config.CaptureDomainFile = filepath.Join(dir, "domain.list")
+	if err := os.WriteFile(config.CaptureDomainFile, []byte("127.0.0.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	config.DialTimeout = 3 * time.Second
 	config.ReadTimeout = 3 * time.Second
 	config.TunnelTimeout = 3 * time.Second
@@ -119,6 +123,25 @@ func TestTrafficCaptureEndToEnd(t *testing.T) {
 	_ = echoConn.Close()
 	stopEcho()
 
+	config.captureDomains = map[string]bool{"not-listed.example": true}
+	transparentTransport := &nethttp.Transport{
+		Proxy:             nethttp.ProxyURL(proxyURL),
+		TLSClientConfig:   &tls.Config{RootCAs: upstreamRoots, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12},
+		DisableKeepAlives: true,
+	}
+	transparentClient := &nethttp.Client{Transport: transparentTransport, Timeout: 5 * time.Second}
+	resp, err := transparentClient.Post(tlsServer.URL+"/unlisted-doh", "application/dns-message", strings.NewReader("doh-request"))
+	if err != nil {
+		t.Fatalf("unlisted HTTPS must stay transparent: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	transparentTransport.CloseIdleConnections()
+	if err != nil || string(body) != "doh-response" {
+		t.Fatalf("unlisted HTTPS response=%q err=%v", body, err)
+	}
+	httpExchangeSOCKS(t, socksAddr, tlsServer.URL+"/socks-unlisted-doh", upstreamRoots, "socks-doh-request", "socks-doh-response")
+
 	want := []string{
 		"plain-request", "plain-response", "secure-request", "secure-response",
 		"ws-request", "ws-response", "wss-request", "wss-response",
@@ -150,6 +173,9 @@ func TestTrafficCaptureEndToEnd(t *testing.T) {
 		if !strings.Contains(captured.String(), value) {
 			t.Errorf("capture logs do not contain %q", value)
 		}
+	}
+	if strings.Contains(captured.String(), "doh-request") {
+		t.Error("unlisted HTTPS/DoH traffic was captured")
 	}
 }
 

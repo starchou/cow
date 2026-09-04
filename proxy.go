@@ -89,7 +89,7 @@ type serverConn struct {
 	bufRd       *bufio.Reader
 	buf         []byte // buffer for the buffered reader
 	hostPort    string
-	state       serverConnState
+	state       uint32
 	willCloseOn time.Time
 	siteInfo    *VisitCnt
 	visited     bool
@@ -712,8 +712,8 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 	// After have received the first reponses from the server, we consider
 	// ther server as real instead of fake one caused by wrong DNS reply. So
 	// don't time out later.
-	sv.state = svSendRecvResponse
-	r.state = rsRecvBody
+	sv.setState(svSendRecvResponse)
+	r.setState(rsRecvBody)
 	r.releaseBuf()
 
 	if _, err = c.Write(rp.rawResponse()); err != nil {
@@ -751,7 +751,7 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 			return err
 		}
 	}
-	r.state = rsDone
+	r.setState(rsDone)
 	/*
 		if debug {
 			debug.Printf("[Finished] %v request %s %s\n", c.RemoteAddr(), r.Method, r.URL)
@@ -779,7 +779,7 @@ func (c *clientConn) getServerConn(r *Request) (*serverConn, error) {
 		// For websites like feedly, the site itself is not blocked, but the
 		// content it loads may result reset. So we should reset server
 		// connection state to just connected.
-		sv.state = svConnected
+		sv.setState(svConnected)
 		if debug {
 			debug.Printf("cli(%s) connPool get %s\n", c.RemoteAddr(), r.URL.HostPort)
 		}
@@ -990,7 +990,11 @@ func (sv *serverConn) Close() error {
 }
 
 func (sv *serverConn) maybeFake() bool {
-	return sv.state == svConnected && sv.isDirect() && !sv.siteInfo.AlwaysDirect()
+	return serverConnState(atomic.LoadUint32(&sv.state)) == svConnected && sv.isDirect() && !sv.siteInfo.AlwaysDirect()
+}
+
+func (sv *serverConn) setState(state serverConnState) {
+	atomic.StoreUint32(&sv.state, uint32(state))
 }
 
 func setConnReadTimeout(cn net.Conn, d time.Duration, msg string) {
@@ -1024,7 +1028,7 @@ func (sv *serverConn) maybeSSLErr(cliStart time.Time) bool {
 	// If client closes connection very soon, maybe there's SSL error, maybe
 	// not (e.g. user stopped request).
 	// COW can't tell which is the case, so this detection is not reliable.
-	return sv.state > svConnected && time.Now().Sub(cliStart) < sslLeastDuration
+	return serverConnState(atomic.LoadUint32(&sv.state)) > svConnected && time.Now().Sub(cliStart) < sslLeastDuration
 }
 
 type tunnelWatchdog struct {
@@ -1162,8 +1166,8 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request, activity *tunn
 		}
 		// debug.Printf("srv(%s)->cli(%s) sent %d bytes data\n", r.URL.HostPort, c.RemoteAddr(), total)
 		// set state to rsRecvBody to indicate the request has partial response sent to client
-		r.state = rsRecvBody
-		sv.state = svSendRecvResponse
+		r.setState(rsRecvBody)
+		sv.setState(svSendRecvResponse)
 		if total > directThreshold {
 			sv.updateVisit()
 		}
@@ -1307,8 +1311,8 @@ var connEstablished = []byte("HTTP/1.1 200 Tunnel established\r\n\r\n")
 
 // Do HTTP CONNECT
 func (sv *serverConn) doConnect(r *Request, c *clientConn) (err error) {
-	r.state = rsCreated
-	if config.Capture {
+	r.setState(rsCreated)
+	if config.Capture && captureDomainAllowed(r.URL.Host) {
 		return sv.doCaptureConnect(r, c)
 	}
 
@@ -1435,14 +1439,14 @@ func (sv *serverConn) sendRequestBody(r *Request, c *clientConn) (err error) {
 
 // Do HTTP request other that CONNECT
 func (sv *serverConn) doRequest(c *clientConn, r *Request, rp *Response) (err error) {
-	r.state = rsCreated
+	r.setState(rsCreated)
 	if err = sv.sendRequestHeader(r, c); err != nil {
 		return
 	}
 	if err = sv.sendRequestBody(r, c); err != nil {
 		return
 	}
-	r.state = rsSent
+	r.setState(rsSent)
 	if err = c.readResponse(sv, r, rp); err == nil {
 		sv.updateVisit()
 	}

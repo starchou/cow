@@ -972,7 +972,7 @@ func (sv *serverConn) tunnel(r *Request, c *clientConn) (err error) {
 }
 
 func (sv *serverConn) doSocksConnect(r *Request, c *clientConn) error {
-	r.state = rsCreated
+	r.setState(rsCreated)
 	if err := sv.establishParentConnect(r, c); err != nil {
 		c.writeSocks5Reply(socksReplyFromError(err), nil)
 		return err
@@ -980,7 +980,7 @@ func (sv *serverConn) doSocksConnect(r *Request, c *clientConn) error {
 	if err := c.writeSocks5Reply(socks5StatusSucceeded, sv.LocalAddr()); err != nil {
 		return err
 	}
-	if config.Capture {
+	if config.Capture && captureDomainAllowed(r.URL.Host) {
 		return sv.doCaptureSocks(r, c)
 	}
 	return sv.tunnel(r, c)

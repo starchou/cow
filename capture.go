@@ -1,6 +1,7 @@
 package main
 
 import (
+	stdbufio "bufio"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -52,6 +53,11 @@ func initCapture() error {
 	if !config.Capture {
 		return nil
 	}
+	domains, err := loadCaptureDomainFile(config.CaptureDomainFile)
+	if err != nil {
+		return err
+	}
+	config.captureDomains = domains
 	if config.CaptureDir == "" {
 		return errors.New("captureDir is empty")
 	}
@@ -105,8 +111,38 @@ func initCapture() error {
 	captureCA.certPEM = certPEM
 	captureCA.leaf = make(map[string]tls.Certificate)
 	captureCA.Unlock()
-	info.Printf("traffic capture enabled: %s; CA certificate: %s\n", dir, certPath)
+	info.Printf("traffic capture enabled for %d domains from %s: %s; CA certificate: %s\n",
+		len(config.captureDomains), config.CaptureDomainFile, dir, certPath)
 	return nil
+}
+
+func loadCaptureDomainFile(file string) (map[string]bool, error) {
+	if file == "" {
+		return nil, errors.New("captureDomainFile is required when capture is enabled")
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, fmt.Errorf("open captureDomainFile: %w", err)
+	}
+	defer f.Close()
+
+	domains := make(map[string]bool)
+	scanner := stdbufio.NewScanner(f)
+	for scanner.Scan() {
+		domain := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
+		if domain == "" || strings.HasPrefix(domain, "#") {
+			continue
+		}
+		domain = normalizeCaptureDomain(domain)
+		if domain == "" || strings.ContainsAny(domain, " /\\") {
+			return nil, fmt.Errorf("invalid capture domain %q", scanner.Text())
+		}
+		domains[domain] = true
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read captureDomainFile: %w", err)
+	}
+	return domains, nil
 }
 
 func generateCaptureCA() ([]byte, []byte, error) {
@@ -196,7 +232,7 @@ type trafficCapture struct {
 }
 
 func startTrafficCapture(r *Request, protocol string) *trafficCapture {
-	if !config.Capture {
+	if !config.Capture || !captureDomainAllowed(r.URL.Host) {
 		return nil
 	}
 	base := path.Base(strings.SplitN(r.URL.Path, "?", 2)[0])
@@ -214,6 +250,33 @@ func startTrafficCapture(r *Request, protocol string) *trafficCapture {
 	c.writeSection("metadata", []byte(fmt.Sprintf("time: %s\nprotocol: %s\ntarget: %s\n", time.Now().Format(time.RFC3339Nano), protocol, r.URL)))
 	c.writeSection("client -> server request", r.rawRequest())
 	return c
+}
+
+func normalizeCaptureDomain(domain string) string {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = strings.TrimPrefix(domain, "*.")
+	domain = strings.TrimPrefix(domain, ".")
+	return strings.TrimSuffix(domain, ".")
+}
+
+func captureDomainAllowed(host string) bool {
+	host = normalizeCaptureDomain(host)
+	if config.captureDomains["*"] || config.captureDomains[host] {
+		return true
+	}
+	if net.ParseIP(host) != nil {
+		return false
+	}
+	for i := strings.IndexByte(host, '.'); i >= 0; i = strings.IndexByte(host, '.') {
+		host = host[i+1:]
+		if net.ParseIP(host) != nil {
+			return false
+		}
+		if config.captureDomains[host] {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanCaptureName(s string) string {

@@ -15,6 +15,18 @@ Traffic capture is disabled by default. Add these options to the rc file:
 ```ini
 capture = true
 captureDir = ~/.cow/capture
+captureDomainFile = ~/.cow/domain.list
+```
+
+The domain file contains one domain per line. Blank lines and lines beginning
+with `#` are ignored; an entry also matches its subdomains. An empty file
+captures nothing. Use a line containing only `*` when every domain should be
+captured:
+
+```text
+# capture targets
+example.com
+api.service.local
 ```
 
 Each request is saved under `captureDir/logs` as

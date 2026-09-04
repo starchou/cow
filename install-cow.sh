@@ -1,6 +1,6 @@
 #!/bin/bash
 
-version=1.0.2
+version=1.0.4
 
 arch=`uname -m`
 case $arch in

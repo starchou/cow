@@ -157,7 +157,8 @@ func TestParseCapture(t *testing.T) {
 	parser := configParser{}
 	parser.ParseCapture("true")
 	parser.ParseCaptureDir("~/captures")
-	if !config.Capture || config.CaptureDir == "~/captures" {
+	parser.ParseCaptureDomainFile("~/.cow/domain.list")
+	if !config.Capture || config.CaptureDir == "~/captures" || config.CaptureDomainFile == "~/.cow/domain.list" {
 		t.Fatalf("capture config was not parsed: %+v", config)
 	}
 }

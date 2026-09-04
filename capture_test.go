@@ -16,6 +16,10 @@ func TestCaptureGeneratesCAAndWritesTraffic(t *testing.T) {
 
 	config.Capture = true
 	config.CaptureDir = t.TempDir()
+	config.CaptureDomainFile = filepath.Join(config.CaptureDir, "domain.list")
+	if err := os.WriteFile(config.CaptureDomainFile, []byte("example.com\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := initCapture(); err != nil {
 		t.Fatal(err)
 	}
@@ -86,5 +90,46 @@ func TestCaptureGeneratesCAAndWritesTraffic(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "POST /api/items.json HTTP/1.1") || !strings.Contains(string(content), "payload") {
 		t.Fatalf("capture is missing request content:\n%s", content)
+	}
+}
+
+func TestCaptureDomainWhitelist(t *testing.T) {
+	oldDomains := config.captureDomains
+	defer func() { config.captureDomains = oldDomains }()
+
+	file := filepath.Join(t.TempDir(), "domain.list")
+	if err := os.WriteFile(file, []byte("# capture targets\nExample.COM\n*.service.local\n\n192.0.2.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	domains, err := loadCaptureDomainFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(domains) != 3 {
+		t.Fatalf("loaded %d capture domains, want 3", len(domains))
+	}
+	config.captureDomains = domains
+	tests := map[string]bool{
+		"example.com":          true,
+		"api.example.com":      true,
+		"SERVICE.LOCAL.":       true,
+		"api.service.local":    true,
+		"192.0.2.1":            true,
+		"notexample.com":       false,
+		"unlisted.example.org": false,
+		"sub.192.0.2.1":        false,
+	}
+	for host, want := range tests {
+		if got := captureDomainAllowed(host); got != want {
+			t.Errorf("captureDomainAllowed(%q)=%v, want %v", host, got, want)
+		}
+	}
+	config.captureDomains = nil
+	if captureDomainAllowed("example.com") {
+		t.Fatal("empty whitelist must capture nothing")
+	}
+	config.captureDomains = map[string]bool{"*": true}
+	if !captureDomainAllowed("anything.example") {
+		t.Fatal("wildcard whitelist must capture every domain")
 	}
 }

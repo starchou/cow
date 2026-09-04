@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cyfdecyf/bufio"
@@ -63,7 +64,7 @@ type Request struct {
 	Header
 	isConnect bool
 	partial   bool // whether contains only partial request data
-	state     rqState
+	state     uint32
 	tryCnt    byte
 	capture   *trafficCapture
 }
@@ -121,11 +122,15 @@ func (r *Request) tooManyRetry() bool {
 }
 
 func (r *Request) responseNotSent() bool {
-	return r.state <= rsSent
+	return rqState(atomic.LoadUint32(&r.state)) <= rsSent
 }
 
 func (r *Request) hasSent() bool {
-	return r.state >= rsSent
+	return rqState(atomic.LoadUint32(&r.state)) >= rsSent
+}
+
+func (r *Request) setState(state rqState) {
+	atomic.StoreUint32(&r.state, uint32(state))
 }
 
 func (r *Request) releaseBuf() {

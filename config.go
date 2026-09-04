@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version               = "1.0.2"
+	version               = "1.0.4"
 	defaultListenAddr     = "127.0.0.1:7777"
 	defaultEstimateTarget = "example.com"
 )
@@ -42,12 +42,13 @@ var defaultTunnelAllowedPort = []string{
 }
 
 type Config struct {
-	RcFile      string          // config file
-	LogFile     string          // path for log file
-	Capture     bool            // save HTTP/WebSocket traffic to CaptureDir
-	CaptureDir  string          // directory for traffic logs and generated CA files
-	AlwaysProxy bool            // whether we should alwyas use parent proxy
-	LoadBalance LoadBalanceMode // select load balance mode
+	RcFile            string          // config file
+	LogFile           string          // path for log file
+	Capture           bool            // save HTTP/WebSocket traffic to CaptureDir
+	CaptureDir        string          // directory for traffic logs and generated CA files
+	CaptureDomainFile string          // newline-separated domain whitelist
+	AlwaysProxy       bool            // whether we should alwyas use parent proxy
+	LoadBalance       LoadBalanceMode // select load balance mode
 
 	TunnelAllowedPort map[string]bool // allowed ports to create tunnel
 
@@ -84,8 +85,8 @@ type Config struct {
 	Systemd      bool
 
 	// not config option
-	saveReqLine bool // for http and cow parent, should save request line from client
-
+	saveReqLine    bool // for http and cow parent, should save request line from client
+	captureDomains map[string]bool
 }
 
 var config Config
@@ -105,6 +106,8 @@ func initConfig(rcFile string) {
 	config.DetectSSLErr = false
 	config.AlwaysProxy = false
 	config.Capture = false
+	config.CaptureDomainFile = ""
+	config.captureDomains = nil
 
 	config.AuthTimeout = 2 * time.Hour
 	config.DialTimeout = defaultDialTimeout
@@ -431,6 +434,10 @@ func (p configParser) ParseCapture(val string) {
 
 func (p configParser) ParseCaptureDir(val string) {
 	config.CaptureDir = expandTilde(val)
+}
+
+func (p configParser) ParseCaptureDomainFile(val string) {
+	config.CaptureDomainFile = expandTilde(val)
 }
 
 func (p configParser) ParseAddrInPAC(val string) {
