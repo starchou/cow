@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"net"
 	"os"
 	"path/filepath"
@@ -75,12 +76,13 @@ func TestCaptureGeneratesCAAndWritesTraffic(t *testing.T) {
 	if capture == nil {
 		t.Fatal("capture was not created")
 	}
-	w := capture.writer("client -> server body")
+	w := capture.bodyWriter("client -> server body", Header{ContentType: "text/plain"})
 	_, _ = w.Write([]byte("pay"))
 	_, _ = w.Write([]byte("load"))
+	_ = w.Close()
 	capture.close()
 
-	logs, err := filepath.Glob(filepath.Join(config.CaptureDir, captureLogsDir, "example.com_items.json_*.log"))
+	logs, err := filepath.Glob(filepath.Join(config.CaptureDir, captureLogsDir, "*", "example.com", "items.json_*.log"))
 	if err != nil || len(logs) != 1 {
 		t.Fatalf("expected one timestamped log, got %v, %v", logs, err)
 	}
@@ -90,6 +92,46 @@ func TestCaptureGeneratesCAAndWritesTraffic(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "POST /api/items.json HTTP/1.1") || !strings.Contains(string(content), "payload") {
 		t.Fatalf("capture is missing request content:\n%s", content)
+	}
+
+	r.URL.Path = "/api/blob.bin"
+	binaryCapture := startTrafficCapture(&r, "http")
+	binaryBody := []byte{0, 1, 2, 3, 255}
+	binaryWriter := binaryCapture.bodyWriter("client -> server body", Header{ContentType: "application/octet-stream"})
+	_, _ = binaryWriter.Write(binaryBody[:2])
+	_, _ = binaryWriter.Write(binaryBody[2:])
+	_ = binaryWriter.Close()
+	binaryCapture.close()
+	binaryLogs, err := filepath.Glob(filepath.Join(config.CaptureDir, captureLogsDir, "*", "example.com", "blob.bin_*.log"))
+	if err != nil || len(binaryLogs) != 1 {
+		t.Fatalf("expected one binary log, got %v, %v", binaryLogs, err)
+	}
+	binaryContent, err := os.ReadFile(binaryLogs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(binaryBody)
+	if !strings.Contains(string(binaryContent), "encoding: base64") || !strings.Contains(string(binaryContent), encoded) {
+		t.Fatalf("binary capture is not base64 encoded:\n%s", binaryContent)
+	}
+}
+
+func TestCaptureBodyEncoding(t *testing.T) {
+	tests := []struct {
+		header        Header
+		binary, known bool
+	}{
+		{Header{}, false, false},
+		{Header{ContentType: "text/plain; charset=utf-8"}, false, true},
+		{Header{ContentType: "application/problem+json"}, false, true},
+		{Header{ContentType: "application/octet-stream"}, true, true},
+		{Header{ContentType: "text/plain", ContentEncoding: "gzip"}, true, true},
+	}
+	for _, tt := range tests {
+		binary, known := captureBodyEncoding(tt.header)
+		if binary != tt.binary || known != tt.known {
+			t.Errorf("captureBodyEncoding(%+v)=(%v,%v), want (%v,%v)", tt.header, binary, known, tt.binary, tt.known)
+		}
 	}
 }
 

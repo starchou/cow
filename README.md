@@ -29,9 +29,11 @@ example.com
 api.service.local
 ```
 
-Each request is saved under `captureDir/logs` as
-`host_target-filename_YYYYMMDD_HHMMSS.nanoseconds.log`. The `logs` directory is
-created automatically.
+Each request is saved as
+`captureDir/logs/YYYYMMDD/domain/api-name_HHMMSS.nanoseconds.log`. Date and
+domain directories are created automatically. Text bodies remain readable;
+binary or content-encoded request/response bodies are stored as streaming
+Base64 and marked with `encoding: base64`.
 WebSocket data is appended to its handshake log in both directions. HTTPS and
 WSS are decrypted locally with a generated CA. On first start, COW creates
 `cow-ca.crt` and `cow-ca.key` in `captureDir`; keep the private key secret.

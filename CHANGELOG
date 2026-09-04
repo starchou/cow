@@ -1,3 +1,7 @@
+1.0.5 (2026-09-04)
+    * Organize capture logs by date and domain
+    * Encode binary request and response bodies as Base64
+
 1.0.4 (2026-09-03)
     * Load the capture domain whitelist from a newline-separated file
 

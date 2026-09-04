@@ -727,10 +727,15 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 
 	if rp.hasBody(r.Method) {
 		var bodyWriter io.Writer = c
-		if r.capture != nil {
-			bodyWriter = io.MultiWriter(c, r.capture.writer("server -> client body"))
+		captureBody := r.capture.bodyWriter("server -> client body", rp.Header)
+		if captureBody != nil {
+			bodyWriter = io.MultiWriter(c, captureBody)
 		}
-		if err = sendBody(bodyWriter, sv.bufRd, int(rp.ContLen), rp.Chunking); err != nil {
+		err = sendBody(bodyWriter, sv.bufRd, int(rp.ContLen), rp.Chunking)
+		if captureBody != nil {
+			_ = captureBody.Close()
+		}
+		if err != nil {
 			if debug {
 				debug.Printf("cli(%s) send body %v\n", c.RemoteAddr(), err)
 			}
@@ -1420,10 +1425,14 @@ func (sv *serverConn) sendRequestBody(r *Request, c *clientConn) (err error) {
 	}
 
 	var bodyWriter io.Writer = newServerWriter(r, sv)
-	if r.capture != nil {
-		bodyWriter = io.MultiWriter(bodyWriter, r.capture.writer("client -> server body"))
+	captureBody := r.capture.bodyWriter("client -> server body", r.Header)
+	if captureBody != nil {
+		bodyWriter = io.MultiWriter(bodyWriter, captureBody)
 	}
 	err = sendBody(bodyWriter, c.bufRd, int(r.ContLen), r.Chunking)
+	if captureBody != nil {
+		_ = captureBody.Close()
+	}
 	if err != nil {
 		errl.Printf("cli(%s) send request body error %v %s\n", c.RemoteAddr(), err, r)
 		if isErrOpWrite(err) {

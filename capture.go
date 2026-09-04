@@ -8,13 +8,16 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"mime"
 	"net"
+	nethttp "net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -239,15 +242,20 @@ func startTrafficCapture(r *Request, protocol string) *trafficCapture {
 	if base == "." || base == "/" || base == "" {
 		base = "root"
 	}
-	name := cleanCaptureName(r.URL.Host + "_" + base)
-	name += "_" + time.Now().Format("20060102_150405.000000000") + ".log"
-	f, err := os.OpenFile(filepath.Join(config.CaptureDir, captureLogsDir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	now := time.Now()
+	dir := filepath.Join(config.CaptureDir, captureLogsDir, now.Format("20060102"), cleanCaptureName(r.URL.Host))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		errl.Printf("create traffic capture directory: %v\n", err)
+		return nil
+	}
+	name := cleanCaptureName(base) + "_" + now.Format("150405.000000000") + ".log"
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		errl.Printf("create traffic capture: %v\n", err)
 		return nil
 	}
 	c := &trafficCapture{file: f}
-	c.writeSection("metadata", []byte(fmt.Sprintf("time: %s\nprotocol: %s\ntarget: %s\n", time.Now().Format(time.RFC3339Nano), protocol, r.URL)))
+	c.writeSection("metadata", []byte(fmt.Sprintf("time: %s\nprotocol: %s\ntarget: %s\n", now.Format(time.RFC3339Nano), protocol, r.URL)))
 	c.writeSection("client -> server request", r.rawRequest())
 	return c
 }
@@ -314,8 +322,12 @@ func (c *trafficCapture) writeSection(label string, p []byte) {
 	}
 }
 
-func (c *trafficCapture) writer(label string) io.Writer {
-	return &capturePayloadWriter{capture: c, label: label}
+func (c *trafficCapture) bodyWriter(label string, header Header) *captureBodyWriter {
+	if c == nil {
+		return nil
+	}
+	binary, known := captureBodyEncoding(header)
+	return &captureBodyWriter{capture: c, label: label, binary: binary, known: known}
 }
 
 func (c *trafficCapture) chunkWriter(label string) io.Writer {
@@ -334,12 +346,6 @@ func (c *trafficCapture) close() {
 	}
 }
 
-type capturePayloadWriter struct {
-	capture *trafficCapture
-	label   string
-	started bool
-}
-
 type captureChunkWriter struct {
 	capture *trafficCapture
 	label   string
@@ -350,17 +356,86 @@ func (w captureChunkWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (w *capturePayloadWriter) Write(p []byte) (int, error) {
+type captureRawWriter struct {
+	capture *trafficCapture
+}
+
+func (w captureRawWriter) Write(p []byte) (int, error) {
 	w.capture.Lock()
+	defer w.capture.Unlock()
 	if w.capture.file != nil {
-		if !w.started {
-			_, _ = fmt.Fprintf(w.capture.file, "\n===== %s %s =====\n", time.Now().Format(time.RFC3339Nano), w.label)
-			w.started = true
-		}
 		_, _ = w.capture.file.Write(p)
 	}
-	w.capture.Unlock()
 	return len(p), nil
+}
+
+type captureBodyWriter struct {
+	capture *trafficCapture
+	label   string
+	binary  bool
+	known   bool
+	started bool
+	closed  bool
+	encoder io.WriteCloser
+}
+
+func (w *captureBodyWriter) Write(p []byte) (int, error) {
+	if !w.started {
+		if !w.known {
+			w.binary, _ = captureBodyEncoding(Header{ContentType: nethttp.DetectContentType(p)})
+		}
+		encoding := "text"
+		if w.binary {
+			encoding = "base64"
+			w.encoder = base64.NewEncoder(base64.StdEncoding, captureRawWriter{capture: w.capture})
+		}
+		w.capture.writeSection(w.label, []byte("encoding: "+encoding+"\n\n"))
+		w.started = true
+	}
+	if w.binary {
+		return w.encoder.Write(p)
+	}
+	return captureRawWriter{capture: w.capture}.Write(p)
+}
+
+func (w *captureBodyWriter) Close() error {
+	if w == nil || w.closed {
+		return nil
+	}
+	w.closed = true
+	var err error
+	if w.encoder != nil {
+		err = w.encoder.Close()
+	}
+	if w.started {
+		_, _ = captureRawWriter{capture: w.capture}.Write([]byte("\n"))
+	}
+	return err
+}
+
+func captureBodyEncoding(header Header) (binary, known bool) {
+	encoding := strings.ToLower(strings.TrimSpace(header.ContentEncoding))
+	if encoding != "" && encoding != "identity" {
+		return true, true
+	}
+	if strings.TrimSpace(header.ContentType) == "" {
+		return false, false
+	}
+	contentType, _, err := mime.ParseMediaType(header.ContentType)
+	if err != nil {
+		contentType = strings.ToLower(strings.TrimSpace(strings.SplitN(header.ContentType, ";", 2)[0]))
+	}
+	if strings.HasPrefix(contentType, "text/") || strings.HasSuffix(contentType, "+json") || strings.HasSuffix(contentType, "+xml") {
+		return false, true
+	}
+	switch contentType {
+	case "application/json", "application/xml", "application/javascript", "application/x-javascript",
+		"application/ecmascript", "application/x-www-form-urlencoded", "application/graphql",
+		"application/yaml", "application/x-yaml", "application/toml", "application/sql":
+		return false, true
+	default:
+		return true, true
+	}
 }
 
 type bufferedNetConn struct {

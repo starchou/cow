@@ -38,7 +38,8 @@ listen = http://0.0.0.0:7777
 #logFile =
 
 # Capture HTTP, HTTPS, WebSocket, and secure WebSocket traffic. Disabled by default.
-# captureDir/logs is created automatically for "target_filename_datetime.log" files.
+# Logs use captureDir/logs/date/domain/api_timestamp.log; directories are automatic.
+# Binary or content-encoded request/response bodies are stored as Base64.
 # When enabled, cow-ca.crt and cow-ca.key are generated in captureDir. Trust
 # cow-ca.crt on the client, or download it from http://<proxy-address>/cow-ca.crt.
 # SOCKS5 HTTP(S)/WS(S) traffic is detected automatically; other protocols stay

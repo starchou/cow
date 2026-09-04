@@ -31,6 +31,8 @@ var CustomHttpErr = errors.New("CustomHttpErr")
 type Header struct {
 	ContLen             int64
 	KeepAlive           time.Duration
+	ContentType         string
+	ContentEncoding     string
 	ProxyAuthorization  string
 	Chunking            bool
 	Trailer             bool
@@ -331,7 +333,9 @@ func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
 // See more at http://homepage.ntlworld.com/jonathan.deboynepollard/FGA/web-proxy-connection-header.html
 const (
 	headerConnection         = "connection"
+	headerContentEncoding    = "content-encoding"
 	headerContentLength      = "content-length"
+	headerContentType        = "content-type"
 	headerExpect             = "expect"
 	headerHost               = "host"
 	headerKeepAlive          = "keep-alive"
@@ -352,7 +356,9 @@ const (
 // Using Go's method expression
 var headerParser = map[string]HeaderParserFunc{
 	headerConnection:         (*Header).parseConnection,
+	headerContentEncoding:    (*Header).parseContentEncoding,
 	headerContentLength:      (*Header).parseContentLength,
+	headerContentType:        (*Header).parseContentType,
 	headerExpect:             (*Header).parseExpect,
 	headerHost:               (*Header).parseHost,
 	headerKeepAlive:          (*Header).parseKeepAlive,
@@ -399,6 +405,16 @@ func (h *Header) parseConnection(s []byte) error {
 func (h *Header) parseContentLength(s []byte) (err error) {
 	h.ContLen, err = ParseIntFromBytes(s, 10)
 	return err
+}
+
+func (h *Header) parseContentType(s []byte) error {
+	h.ContentType = string(s)
+	return nil
+}
+
+func (h *Header) parseContentEncoding(s []byte) error {
+	h.ContentEncoding = string(s)
+	return nil
 }
 
 func (h *Header) parseHost(s []byte) (err error) {

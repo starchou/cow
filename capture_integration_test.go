@@ -2,8 +2,10 @@ package main
 
 import (
 	stdbufio "bufio"
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -102,6 +104,22 @@ func TestTrafficCaptureEndToEnd(t *testing.T) {
 		}
 	}
 	transport.CloseIdleConnections()
+	binaryRequest := []byte{0, 1, 2, 255}
+	binaryResponse := []byte{255, 2, 1, 0}
+	req, err := nethttp.NewRequest("POST", plainServer.URL+"/binary.bin", bytes.NewReader(binaryRequest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || !bytes.Equal(body, binaryResponse) {
+		t.Fatalf("binary response=%v err=%v", body, err)
+	}
 
 	webSocketExchange(t, proxyURL.Host, strings.Replace(plainServer.URL, "http://", "ws://", 1)+"/plain-socket", nil, "ws-request", "ws-response")
 	webSocketExchange(t, proxyURL.Host, strings.Replace(tlsServer.URL, "https://", "wss://", 1)+"/secure-socket", rootPool, "wss-request", "wss-response")
@@ -130,11 +148,11 @@ func TestTrafficCaptureEndToEnd(t *testing.T) {
 		DisableKeepAlives: true,
 	}
 	transparentClient := &nethttp.Client{Transport: transparentTransport, Timeout: 5 * time.Second}
-	resp, err := transparentClient.Post(tlsServer.URL+"/unlisted-doh", "application/dns-message", strings.NewReader("doh-request"))
+	resp, err = transparentClient.Post(tlsServer.URL+"/unlisted-doh", "application/dns-message", strings.NewReader("doh-request"))
 	if err != nil {
 		t.Fatalf("unlisted HTTPS must stay transparent: %v", err)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	transparentTransport.CloseIdleConnections()
 	if err != nil || string(body) != "doh-response" {
@@ -149,25 +167,25 @@ func TestTrafficCaptureEndToEnd(t *testing.T) {
 		"socks-ws-request", "socks-ws-response", "socks-wss-request", "socks-wss-response",
 	}
 	logsDir := filepath.Join(config.CaptureDir, captureLogsDir)
-	entries, err := os.ReadDir(logsDir)
+	var captured strings.Builder
+	logCount := 0
+	err = filepath.WalkDir(logsDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || filepath.Ext(entry.Name()) != ".log" {
+			return walkErr
+		}
+		logCount++
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		captured.Write(data)
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var captured strings.Builder
-	logCount := 0
-	for _, entry := range entries {
-		if filepath.Ext(entry.Name()) != ".log" {
-			continue
-		}
-		logCount++
-		data, err := os.ReadFile(filepath.Join(logsDir, entry.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		captured.Write(data)
-	}
-	if logCount != 8 {
-		t.Errorf("capture log count=%d, want 8; non-HTTP SOCKS5 traffic must stay transparent", logCount)
+	if logCount != 9 {
+		t.Errorf("capture log count=%d, want 9; non-HTTP SOCKS5 traffic must stay transparent", logCount)
 	}
 	for _, value := range want {
 		if !strings.Contains(captured.String(), value) {
@@ -177,9 +195,20 @@ func TestTrafficCaptureEndToEnd(t *testing.T) {
 	if strings.Contains(captured.String(), "doh-request") {
 		t.Error("unlisted HTTPS/DoH traffic was captured")
 	}
+	for _, data := range [][]byte{binaryRequest, binaryResponse} {
+		if encoded := base64.StdEncoding.EncodeToString(data); !strings.Contains(captured.String(), encoded) {
+			t.Errorf("capture logs do not contain base64 body %q", encoded)
+		}
+	}
 }
 
 func captureTestHandler(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if strings.Contains(r.URL.Path, "binary") {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte{255, 2, 1, 0})
+		return
+	}
 	if strings.Contains(r.URL.Path, "socket") {
 		conn, rw, err := w.(nethttp.Hijacker).Hijack()
 		if err != nil {

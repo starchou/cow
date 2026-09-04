@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version               = "1.0.4"
+	version               = "1.0.5"
 	defaultListenAddr     = "127.0.0.1:7777"
 	defaultEstimateTarget = "example.com"
 )

@@ -123,6 +123,9 @@ func TestParseHeader(t *testing.T) {
 		{"Connection: \r\n close\r\nLong: line\r\n continued\r\n\tagain\r\n\r\n",
 			"Long: line continued again\r\n",
 			&Header{ContLen: -1, Chunking: false, ConnectionKeepAlive: false}},
+		{"Content-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Length: 3\r\n\r\n",
+			"Content-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Length: 3\r\n",
+			&Header{ContLen: 3, ContentType: "application/octet-stream", ContentEncoding: "gzip"}},
 	}
 	for _, td := range testData {
 		var h Header
@@ -139,6 +142,10 @@ func TestParseHeader(t *testing.T) {
 		if h.ConnectionKeepAlive != td.header.ConnectionKeepAlive {
 			t.Errorf("%q parsed connection wrong, should be %v, get %v\n",
 				td.raw, td.header.ConnectionKeepAlive, h.ConnectionKeepAlive)
+		}
+		if h.ContentType != td.header.ContentType || h.ContentEncoding != td.header.ContentEncoding {
+			t.Errorf("%q parsed content metadata wrong: type=%q encoding=%q\n",
+				td.raw, h.ContentType, h.ContentEncoding)
 		}
 		if h.KeepAlive != td.header.KeepAlive {
 			t.Errorf("%q parsed keep alive wrong, should be %v, get %v\n",
