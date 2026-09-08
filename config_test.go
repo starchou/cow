@@ -220,6 +220,16 @@ func TestParseProxy(t *testing.T) {
 		t.Error("socks server address wrong, got:", sp.server)
 	}
 
+	parser.ParseProxy("socks5://alice:s3:cret@127.0.0.1:1084")
+	cnt++
+	sp, ok = pool.parent[cnt].ParentProxy.(*socksParent)
+	if !ok || sp.server != "127.0.0.1:1084" || sp.username != "alice" || sp.password != "s3:cret" {
+		t.Fatalf("authenticated socks proxy parsed incorrectly: %+v", sp)
+	}
+	if got := sp.genConfig(); got != "proxy = socks5://alice:s3:cret@127.0.0.1:1084" {
+		t.Fatalf("authenticated socks config generated as %q", got)
+	}
+
 	parser.ParseProxy("sock5://127.0.0.1:1081")
 	cnt++
 	sp, ok = pool.parent[cnt].ParentProxy.(*socksParent)
@@ -230,10 +240,48 @@ func TestParseProxy(t *testing.T) {
 		t.Error("sock5 alias server address wrong, got:", sp.server)
 	}
 
+	parser.ParseProxy("socks5://2001:db8::1:1082")
+	cnt++
+	sp, ok = pool.parent[cnt].ParentProxy.(*socksParent)
+	if !ok {
+		t.Fatal("IPv6 socks proxy parsed not as socksParent")
+	}
+	if sp.server != "[2001:db8::1]:1082" {
+		t.Fatalf("IPv6 socks server address not normalized, got %s", sp.server)
+	}
+
+	parser.ParseSocksParent("socks5://127.0.0.1:1083")
+	cnt++
+	sp, ok = pool.parent[cnt].ParentProxy.(*socksParent)
+	if !ok || sp.server != "127.0.0.1:1083" {
+		t.Fatalf("legacy socksParent URL not normalized, got %+v", sp)
+	}
+
 	parser.ParseProxy("ss://aes-256-cfb:foobar!@127.0.0.1:1080")
 	cnt++
 	_, ok = pool.parent[cnt].ParentProxy.(*shadowsocksParent)
 	if !ok {
 		t.Fatal("shadowsocks proxy parsed not as shadowsocksParent")
+	}
+}
+
+func TestNormalizeServerAddr(t *testing.T) {
+	tests := map[string]string{
+		"proxy.example:1080": "proxy.example:1080",
+		"127.0.0.1:1080":     "127.0.0.1:1080",
+		"[2001:db8::1]:1080": "[2001:db8::1]:1080",
+		"2001:db8::1:1080":   "[2001:db8::1]:1080",
+		"fe80::1%en0:1080":   "[fe80::1%en0]:1080",
+	}
+	for input, want := range tests {
+		got, err := normalizeServerAddr(input)
+		if err != nil || got != want {
+			t.Errorf("normalizeServerAddr(%q)=%q, %v; want %q", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"2001:db8::1", "proxy.example"} {
+		if _, err := normalizeServerAddr(input); err == nil {
+			t.Errorf("normalizeServerAddr(%q) should fail", input)
+		}
 	}
 }

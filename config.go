@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version               = "1.0.5"
+	version               = "1.0.6"
 	defaultListenAddr     = "127.0.0.1:7777"
 	defaultEstimateTarget = "example.com"
 )
@@ -225,6 +225,29 @@ func checkServerAddr(addr string) error {
 	return err
 }
 
+func normalizeServerAddr(addr string) (string, error) {
+	if err := checkServerAddr(addr); err == nil {
+		return addr, nil
+	}
+	i := strings.LastIndexByte(addr, ':')
+	if i <= 0 || i == len(addr)-1 {
+		return "", fmt.Errorf("invalid server address %q", addr)
+	}
+	host, port := addr[:i], addr[i+1:]
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return "", fmt.Errorf("invalid server address %q", addr)
+	}
+	ipHost := host
+	if zone := strings.LastIndexByte(ipHost, '%'); zone >= 0 {
+		ipHost = ipHost[:zone]
+	}
+	if net.ParseIP(ipHost) == nil {
+		return "", fmt.Errorf("invalid server address %q", addr)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
 func isUserPasswdValid(val string) bool {
 	arr := strings.SplitN(val, ":", 2)
 	if len(arr) != 2 || arr[0] == "" || arr[1] == "" {
@@ -237,10 +260,28 @@ func isUserPasswdValid(val string) bool {
 type proxyParser struct{}
 
 func (p proxyParser) ProxySocks5(val string) {
-	if err := checkServerAddr(val); err != nil {
+	server, username, password, err := parseSocksParent(val)
+	if err != nil {
 		Fatal("parent socks server", err)
 	}
-	parentProxy.add(newSocksParent(val))
+	parentProxy.add(newSocksParentAuth(server, username, password))
+}
+
+func parseSocksParent(val string) (server, username, password string, err error) {
+	val = strings.TrimPrefix(strings.TrimPrefix(val, "socks5://"), "sock5://")
+	if i := strings.LastIndexByte(val, '@'); i >= 0 {
+		credentials := strings.SplitN(val[:i], ":", 2)
+		if len(credentials) != 2 || credentials[0] == "" || credentials[1] == "" {
+			return "", "", "", errors.New("SOCKS5 authentication must be user:password@server:port")
+		}
+		username, password = credentials[0], credentials[1]
+		if len(username) > 255 || len(password) > 255 {
+			return "", "", "", errors.New("SOCKS5 username and password must be at most 255 bytes")
+		}
+		val = val[i+1:]
+	}
+	server, err = normalizeServerAddr(val)
+	return
 }
 
 func (pp proxyParser) ProxyHttp(val string) {

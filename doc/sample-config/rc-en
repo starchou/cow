@@ -83,6 +83,9 @@ listen = http://0.0.0.0:7777
 #
 # SOCKS5:
 #   proxy = socks5://127.0.0.1:1080
+#   proxy = socks5://user:password@127.0.0.1:1080
+#   proxy = socks5://[2001:db8::1]:1080
+# Unbracketed IPv6 addresses are normalized automatically.
 #
 # HTTP:
 #   proxy = http://127.0.0.1:8080

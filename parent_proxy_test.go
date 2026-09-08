@@ -209,3 +209,81 @@ func TestSocksParentConnectReadsVariableLengthReply(t *testing.T) {
 		t.Fatalf("fake socks parent error: %v", err)
 	}
 }
+
+func TestSocksParentUsernamePasswordAuthentication(t *testing.T) {
+	oldDial := socksParentDial
+	defer func() { socksParentDial = oldDial }()
+
+	clientSide, parentSide := net.Pipe()
+	socksParentDial = func(network, address string) (net.Conn, error) { return clientSide, nil }
+	errCh := make(chan error, 1)
+	go func() {
+		defer parentSide.Close()
+		var method [3]byte
+		if _, err := io.ReadFull(parentSide, method[:]); err != nil {
+			errCh <- err
+			return
+		}
+		if method != [3]byte{socks5Version, 1, socks5AuthUserPass} {
+			errCh <- errors.New("client did not request username/password authentication")
+			return
+		}
+		if _, err := parentSide.Write([]byte{socks5Version, socks5AuthUserPass}); err != nil {
+			errCh <- err
+			return
+		}
+
+		var authHeader [2]byte
+		if _, err := io.ReadFull(parentSide, authHeader[:]); err != nil {
+			errCh <- err
+			return
+		}
+		username := make([]byte, int(authHeader[1]))
+		if _, err := io.ReadFull(parentSide, username); err != nil {
+			errCh <- err
+			return
+		}
+		var passwordLength [1]byte
+		if _, err := io.ReadFull(parentSide, passwordLength[:]); err != nil {
+			errCh <- err
+			return
+		}
+		password := make([]byte, int(passwordLength[0]))
+		if _, err := io.ReadFull(parentSide, password); err != nil {
+			errCh <- err
+			return
+		}
+		if authHeader[0] != socks5UserPassVersion || string(username) != "alice" || string(password) != "s3:cret" {
+			errCh <- errors.New("wrong SOCKS5 credentials")
+			return
+		}
+		if _, err := parentSide.Write([]byte{socks5UserPassVersion, 0}); err != nil {
+			errCh <- err
+			return
+		}
+
+		reqHead := make([]byte, 5)
+		if _, err := io.ReadFull(parentSide, reqHead); err != nil {
+			errCh <- err
+			return
+		}
+		target := make([]byte, int(reqHead[4])+2)
+		if _, err := io.ReadFull(parentSide, target); err != nil {
+			errCh <- err
+			return
+		}
+		reply := []byte{socks5Version, 0, 0, socks5AtypIPv4, 0, 0, 0, 0, 0, 0}
+		_, err := parentSide.Write(reply)
+		errCh <- err
+	}()
+
+	sp := newSocksParentAuth("127.0.0.1:1080", "alice", "s3:cret")
+	conn, err := sp.connect(&URL{Host: "example.com", Port: "443", HostPort: "example.com:443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}

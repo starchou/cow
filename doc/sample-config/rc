@@ -75,6 +75,9 @@ listen = http://0.0.0.0:7777
 #
 # SOCKS5:
 #   proxy = socks5://127.0.0.1:1080
+#   proxy = socks5://user:password@127.0.0.1:1080
+#   proxy = socks5://[2001:db8::1]:1080
+# 未加方括号的 IPv6 地址也会自动规范化
 #
 # HTTP:
 #   proxy = http://127.0.0.1:8080

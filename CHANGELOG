@@ -1,3 +1,7 @@
+1.0.6 (2026-09-08)
+    * Support username/password authentication for SOCKS5 parent proxies
+    * Accept unbracketed IPv6 addresses for SOCKS5 parent proxies
+
 1.0.5 (2026-09-04)
     * Organize capture logs by date and domain
     * Encode binary request and response bodies as Base64

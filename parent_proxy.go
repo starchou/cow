@@ -710,7 +710,9 @@ var socksMsgVerMethodSelection = []byte{
 
 // socks5 parent proxy
 type socksParent struct {
-	server string
+	server   string
+	username string
+	password string
 }
 
 type socksConn struct {
@@ -725,7 +727,11 @@ func (s socksConn) String() string {
 }
 
 func newSocksParent(server string) *socksParent {
-	return &socksParent{server}
+	return &socksParent{server: server}
+}
+
+func newSocksParentAuth(server, username, password string) *socksParent {
+	return &socksParent{server: server, username: username, password: password}
 }
 
 func (sp *socksParent) getServer() string {
@@ -733,7 +739,31 @@ func (sp *socksParent) getServer() string {
 }
 
 func (sp *socksParent) genConfig() string {
+	if sp.username != "" {
+		return fmt.Sprintf("proxy = socks5://%s:%s@%s", sp.username, sp.password, sp.server)
+	}
 	return fmt.Sprintf("proxy = socks5://%s", sp.server)
+}
+
+func (sp *socksParent) authenticate(c net.Conn) error {
+	request := make([]byte, 0, len(sp.username)+len(sp.password)+3)
+	request = append(request, socks5UserPassVersion, byte(len(sp.username)))
+	request = append(request, sp.username...)
+	request = append(request, byte(len(sp.password)))
+	request = append(request, sp.password...)
+	if n, err := c.Write(request); err != nil {
+		return fmt.Errorf("send SOCKS5 authentication: %w", err)
+	} else if n != len(request) {
+		return io.ErrShortWrite
+	}
+	var response [2]byte
+	if _, err := io.ReadFull(c, response[:]); err != nil {
+		return fmt.Errorf("read SOCKS5 authentication: %w", err)
+	}
+	if response[0] != socks5UserPassVersion || response[1] != 0 {
+		return errors.New("SOCKS5 username/password authentication failed")
+	}
+	return nil
 }
 
 func readSocks5Address(r io.Reader, atyp byte) error {
@@ -803,8 +833,12 @@ func (sp *socksParent) connect(url *URL) (net.Conn, error) {
 		}
 	}()
 
+	methodSelection := socksMsgVerMethodSelection
+	if sp.username != "" {
+		methodSelection = []byte{socks5Version, 1, socks5AuthUserPass}
+	}
 	var n int
-	if n, err = c.Write(socksMsgVerMethodSelection); n != 3 || err != nil {
+	if n, err = c.Write(methodSelection); n != len(methodSelection) || err != nil {
 		errl.Printf("sending ver/method selection msg %v n = %v\n", err, n)
 		hasErr = true
 		return nil, err
@@ -818,11 +852,18 @@ func (sp *socksParent) connect(url *URL) (net.Conn, error) {
 		hasErr = true
 		return nil, err
 	}
-	if repBuf[0] != 5 || repBuf[1] != 0 {
+	if repBuf[0] != socks5Version || (repBuf[1] != socks5AuthNone && repBuf[1] != socks5AuthUserPass) ||
+		(repBuf[1] == socks5AuthUserPass) != (sp.username != "") {
 		errl.Printf("socks ver/method selection reply error ver %d method %d",
 			repBuf[0], repBuf[1])
 		hasErr = true
-		return nil, err
+		return nil, socksProtocolErr
+	}
+	if repBuf[1] == socks5AuthUserPass {
+		if err = sp.authenticate(c); err != nil {
+			hasErr = true
+			return nil, err
+		}
 	}
 	// debug.Println("Socks version selection done")
 
