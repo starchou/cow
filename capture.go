@@ -661,6 +661,7 @@ func (sv *serverConn) serveCapturedHTTP(c *clientConn, target *URL, secure bool)
 		}
 		r.capture = startTrafficCapture(&r, protocol)
 		err := sv.doRequest(c, &r, &rp)
+		r.plugin.discard()
 		r.releaseBuf()
 		r.capture.close()
 		if err != nil {

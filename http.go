@@ -69,12 +69,15 @@ type Request struct {
 	state     uint32
 	tryCnt    byte
 	capture   *trafficCapture
+	plugin    *pluginExchange
+	startedAt time.Time
 }
 
 // Assume keep-alive request by default.
 var zeroRequest = Request{Header: Header{ConnectionKeepAlive: true}}
 
 func (r *Request) reset() {
+	r.plugin.discard()
 	b := r.rawByte
 	raw := r.raw
 	*r = zeroRequest // reset to zero value
@@ -628,6 +631,7 @@ func parseRequest(c *clientConn, r *Request) (err error) {
 	// debug.Printf("Request line %s", s)
 
 	r.reset()
+	r.startedAt = time.Now()
 	if config.saveReqLine {
 		r.raw.Write(s)
 		r.reqLnStart = len(s)

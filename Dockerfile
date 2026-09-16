@@ -1,4 +1,4 @@
-FROM golang:1.19.2-bullseye AS builder
+FROM golang:1.23.7-bullseye AS builder
 
 # install dependencies
 RUN apt-get update \

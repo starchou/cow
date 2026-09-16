@@ -56,7 +56,23 @@ Certificate pinning is intentionally not bypassed. Capture logs contain full
 request and response data, including credentials and cookies; use this only on
 systems and traffic you are authorized to inspect.
 
+## HTTP plugin storage
+
+Enable the a572 decoder and asynchronous SQLite storage:
+
+```ini
+plugin = masterrummy
+pluginDBFile = ~/.cow/plugins.sqlite3
+```
+
+Only complete, successfully decrypted a572 `/i.php` transactions are inserted.
+The database includes raw request/response bytes, decoded content and indexed
+action/uid/request-time fields. HTTPS/SOCKS5 use the existing capture whitelist.
+See [plugin configuration, schema and queries](plugins/README.md) for details.
+
 ## Install
+
+Builds require Go 1.21 or newer. SQLite uses a pure-Go driver (no CGO required).
 
 ### Docker
 

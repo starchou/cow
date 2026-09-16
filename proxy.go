@@ -478,6 +478,7 @@ func (c *clientConn) serve() {
 	}
 
 	defer func() {
+		r.plugin.discard()
 		r.releaseBuf()
 		c.Close()
 	}()
@@ -706,6 +707,18 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 		return c.handleServerReadError(r, sv, err, "parse response")
 	}
 	dbgPrintRep(c, r, rp)
+	if r.plugin != nil && len(rp.rawResponse()) > pluginBodyLimit {
+		r.plugin.owner.dropped.Add(1)
+		r.plugin.discard()
+		r.plugin = nil
+	}
+	if r.plugin != nil {
+		r.plugin.status = rp.Status
+		r.plugin.responseHeaders = append([]byte(nil), rp.rawResponse()...)
+		r.plugin.responseMeta = rp.Header
+		// sendBody converts close-delimited responses to chunked on the client side.
+		r.plugin.responseMeta.Chunking = rp.Chunking || rp.ContLen < 0 && rp.hasBody(r.Method)
+	}
 	if r.capture != nil {
 		r.capture.writeSection("server -> client response", rp.rawResponse())
 	}
@@ -730,6 +743,9 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 		captureBody := r.capture.bodyWriter("server -> client body", rp.Header)
 		if captureBody != nil {
 			bodyWriter = io.MultiWriter(c, captureBody)
+		}
+		if r.plugin != nil {
+			bodyWriter = io.MultiWriter(bodyWriter, &r.plugin.responseBody)
 		}
 		err = sendBody(bodyWriter, sv.bufRd, int(rp.ContLen), rp.Chunking)
 		if captureBody != nil {
@@ -757,6 +773,11 @@ func (c *clientConn) readResponse(sv *serverConn, r *Request, rp *Response) (err
 		}
 	}
 	r.setState(rsDone)
+	if r.plugin != nil {
+		exchange := r.plugin
+		r.plugin = nil // ownership transfers to the worker on submit
+		exchange.submit()
+	}
 	/*
 		if debug {
 			debug.Printf("[Finished] %v request %s %s\n", c.RemoteAddr(), r.Method, r.URL)
@@ -1429,6 +1450,9 @@ func (sv *serverConn) sendRequestBody(r *Request, c *clientConn) (err error) {
 	if captureBody != nil {
 		bodyWriter = io.MultiWriter(bodyWriter, captureBody)
 	}
+	if r.plugin != nil {
+		bodyWriter = io.MultiWriter(bodyWriter, &r.plugin.requestBody)
+	}
 	err = sendBody(bodyWriter, c.bufRd, int(r.ContLen), r.Chunking)
 	if captureBody != nil {
 		_ = captureBody.Close()
@@ -1448,6 +1472,9 @@ func (sv *serverConn) sendRequestBody(r *Request, c *clientConn) (err error) {
 
 // Do HTTP request other that CONNECT
 func (sv *serverConn) doRequest(c *clientConn, r *Request, rp *Response) (err error) {
+	if !r.isRetry() && r.plugin == nil {
+		r.plugin = httpPlugin.begin(r)
+	}
 	r.setState(rsCreated)
 	if err = sv.sendRequestHeader(r, c); err != nil {
 		return

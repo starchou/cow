@@ -50,6 +50,9 @@ func main() {
 	if err := initCapture(); err != nil {
 		Fatal("initialize traffic capture:", err)
 	}
+	if err := initHTTPPlugin(); err != nil {
+		Fatal("initialize HTTP plugin:", err)
+	}
 	initAuth()
 	initSiteStat()
 	initPAC() // initPAC uses siteStat, so must init after site stat
@@ -87,6 +90,7 @@ func main() {
 	}
 
 	wg.Wait()
+	httpPlugin.close() // stop admission and drain queued records before exit/relaunch
 
 	if relaunch {
 		info.Println("Relunching cow...")

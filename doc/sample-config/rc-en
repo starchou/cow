@@ -50,6 +50,14 @@ listen = http://0.0.0.0:7777
 # One domain per line; blank/# lines are ignored. Subdomains match; * means all.
 #captureDomainFile = ~/.cow/domain.list
 
+# Optional HTTP plugin. Comment out plugin to disable it (default).
+# masterrummy stores a572 /i.php pairs only when both sides decrypt successfully.
+# HTTP works independently of capture; HTTPS/SOCKS5 require capture + its whitelist.
+#plugin = masterrummy
+#pluginDBFile = ~/.cow/plugins.sqlite3
+# Defaults to plugins.sqlite3 beside rc. Tables and action/uid/time indexes are automatic.
+# Up to 64 pending exchanges; 1 MiB per header/body. Overflow is dropped without blocking.
+
 # By default, COW only uses parent proxy if the site is blocked.
 # If the following option is true, COW will use parent proxy for all sites.
 #alwaysProxy = false

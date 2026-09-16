@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version               = "1.0.6"
+	version               = "1.0.7"
 	defaultListenAddr     = "127.0.0.1:7777"
 	defaultEstimateTarget = "example.com"
 )
@@ -47,6 +47,8 @@ type Config struct {
 	Capture           bool            // save HTTP/WebSocket traffic to CaptureDir
 	CaptureDir        string          // directory for traffic logs and generated CA files
 	CaptureDomainFile string          // newline-separated domain whitelist
+	Plugin            string          // optional HTTP plugin module
+	PluginDBFile      string          // SQLite output for the HTTP plugin
 	AlwaysProxy       bool            // whether we should alwyas use parent proxy
 	LoadBalance       LoadBalanceMode // select load balance mode
 
@@ -102,6 +104,8 @@ func initConfig(rcFile string) {
 	config.DirectFile = path.Join(config.dir, directFname)
 	config.StatFile = path.Join(config.dir, statFname)
 	config.CaptureDir = path.Join(config.dir, "capture")
+	config.Plugin = ""
+	config.PluginDBFile = path.Join(config.dir, "plugins.sqlite3")
 
 	config.DetectSSLErr = false
 	config.AlwaysProxy = false
@@ -479,6 +483,14 @@ func (p configParser) ParseCaptureDir(val string) {
 
 func (p configParser) ParseCaptureDomainFile(val string) {
 	config.CaptureDomainFile = expandTilde(val)
+}
+
+func (p configParser) ParsePlugin(val string) {
+	config.Plugin = val
+}
+
+func (p configParser) ParsePluginDBFile(val string) {
+	config.PluginDBFile = expandTilde(val)
 }
 
 func (p configParser) ParseAddrInPAC(val string) {
